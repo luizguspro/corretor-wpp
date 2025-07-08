@@ -2,6 +2,7 @@
 const evolutionService = require('./evolutionService');
 const messageTemplates = require('../utils/messageTemplates');
 const { searchProperties, getPropertyById, getFeaturedProperties } = require('../data/realEstateData');
+const axios = require('axios'); // ADICIONADO
 
 // Importar OpenAI apenas se estiver configurado
 let openaiService = null;
@@ -32,7 +33,7 @@ class MessageService {
       LOCATION_SEARCH: 'location_search',
       AUDIO_RECEIVED: 'audio_received'
     };
-    
+
     // Lista de agentes
     this.agents = [
       { name: 'Carlos Silva', phone: '48999887766', specialty: 'Vendas Alto Padrão' },
@@ -40,33 +41,33 @@ class MessageService {
       { name: 'Roberto Santos', phone: '48999665544', specialty: 'Lançamentos' }
     ];
   }
-  
+
   // Processar mensagem recebida
   async processMessage(data) {
     console.log('\n🔍 Processando mensagem...');
-    
+
     if (!data || !data.key || !data.key.remoteJid) {
       console.log('❌ Dados inválidos');
       return;
     }
-    
+
     const { key, message, pushName } = data;
     const from = key.remoteJid;
-    
+
     // Ignorar mensagens próprias em produção
     if (key.fromMe && process.env.NODE_ENV === 'production') {
       return;
     }
-    
+
     // Ignorar grupos
     if (from.includes('@g.us')) {
       return;
     }
-    
+
     // Obter sessão e perfil
     const session = this.getUserSession(from);
     const profile = this.getUserProfile(from, pushName);
-    
+
     // Processar diferentes tipos de mensagem
     if (message) {
       try {
@@ -90,48 +91,136 @@ class MessageService {
       }
     }
   }
-  
-  // Lidar com mensagens de áudio
+
+  // Lidar com mensagens de áudio - CORRIGIDO
   async handleAudioMessage(from, audioMessage, session, profile) {
     try {
       await evolutionService.sendTextMessage(from, '🎤 Recebendo seu áudio...');
-      
+
       // Verificar se OpenAI está disponível
-      if (!openaiService) {
+      if (!openaiService || !process.env.OPENAI_API_KEY) {
         await evolutionService.sendTextMessage(
           from,
           '😔 Desculpe, a transcrição de áudio está temporariamente indisponível. Por favor, digite sua mensagem.'
         );
         return;
       }
-      
-      // Baixar áudio
-      const audioBuffer = Buffer.from(audioMessage.fileEncSha256, 'base64');
-      
+
+      console.log('🎧 Processando áudio:', {
+        mimetype: audioMessage.mimetype,
+        fileLength: audioMessage.fileLength,
+        seconds: audioMessage.seconds
+      });
+
+      // Evolution API pode enviar o áudio de diferentes formas
+      let audioBuffer = null;
+
+      if (audioMessage.base64) {
+        // Se vier em base64
+        console.log('📦 Áudio em base64 detectado');
+        audioBuffer = Buffer.from(audioMessage.base64, 'base64');
+      } else if (audioMessage.data) {
+        // Às vezes vem como 'data'
+        console.log('📦 Áudio em data detectado');
+        audioBuffer = Buffer.from(audioMessage.data, 'base64');
+      } else if (audioMessage.url) {
+        // Se vier como URL, fazer download
+        console.log('🔗 URL de áudio detectada:', audioMessage.url);
+        try {
+          const response = await axios.get(audioMessage.url, {
+            responseType: 'arraybuffer'
+          });
+          audioBuffer = Buffer.from(response.data);
+        } catch (error) {
+          console.error('Erro ao baixar áudio:', error);
+          throw new Error('Não consegui baixar o áudio');
+        }
+      } else {
+        // Tentar outras propriedades comuns
+        const possibleKeys = ['fileEncSha256', 'fileSha256', 'mediaKey', 'directPath'];
+        for (const key of possibleKeys) {
+          if (audioMessage[key]) {
+            console.log(`📦 Tentando usar ${key} como áudio`);
+            try {
+              audioBuffer = Buffer.from(audioMessage[key], 'base64');
+              break;
+            } catch (e) {
+              console.log(`❌ ${key} não é base64 válido`);
+            }
+          }
+        }
+      }
+
+      if (!audioBuffer || audioBuffer.length === 0) {
+        console.error('❌ Não foi possível extrair o áudio da mensagem');
+        console.log('Estrutura do audioMessage:', JSON.stringify(audioMessage, null, 2));
+
+        await evolutionService.sendTextMessage(
+          from,
+          '😔 Desculpe, não consegui processar seu áudio. Pode tentar enviar novamente ou digitar sua mensagem?'
+        );
+        return;
+      }
+
+      console.log(`✅ Buffer de áudio criado: ${audioBuffer.length} bytes`);
+
       // Transcrever com OpenAI
-      const transcription = await openaiService.transcribeAudio(audioBuffer, 'ogg');
-      
-      await evolutionService.sendTextMessage(
-        from, 
-        `📝 Entendi: "${transcription}"\n\nProcessando sua solicitação...`
-      );
-      
-      // Processar como texto
-      await this.handleTextMessage(from, transcription, session, profile);
-      
+      let transcription = '';
+      try {
+        transcription = await openaiService.transcribeAudio(
+          audioBuffer,
+          audioMessage.mimetype || 'audio/ogg'
+        );
+
+        console.log('📝 Transcrição:', transcription);
+
+        // Enviar confirmação da transcrição
+        await evolutionService.sendTextMessage(
+          from,
+          `📝 Entendi: "${transcription}"\n\nProcessando sua solicitação...`
+        );
+
+      } catch (error) {
+        console.error('Erro na transcrição:', error);
+
+        // Mensagem de erro mais específica
+        let errorMessage = '😔 Desculpe, não consegui transcrever seu áudio. ';
+
+        if (error.message.includes('API key')) {
+          errorMessage += 'Problema com a configuração da API.';
+        } else if (error.message.includes('format')) {
+          errorMessage += 'O formato do áudio não é suportado.';
+        } else {
+          errorMessage += 'Pode tentar novamente ou digitar sua mensagem?';
+        }
+
+        await evolutionService.sendTextMessage(from, errorMessage);
+        return;
+      }
+
+      // Processar a transcrição como texto normal
+      if (transcription && transcription.trim()) {
+        await this.handleTextMessage(from, transcription, session, profile);
+      } else {
+        await evolutionService.sendTextMessage(
+          from,
+          '🤔 Não consegui entender o áudio. Pode falar mais claramente ou digitar sua mensagem?'
+        );
+      }
+
     } catch (error) {
-      console.error('Erro ao processar áudio:', error);
+      console.error('Erro geral ao processar áudio:', error);
       await evolutionService.sendTextMessage(
         from,
-        '😔 Desculpe, não consegui processar seu áudio. Pode digitar sua mensagem?'
+        '😔 Desculpe, houve um erro ao processar seu áudio. Por favor, tente novamente ou digite sua mensagem.'
       );
     }
   }
-  
+
   // Lidar com mensagens de texto com IA
   async handleTextMessage(from, text, session, profile) {
     const lowerText = text.toLowerCase().trim();
-    
+
     // Analisar intenção com OpenAI (se disponível)
     let intent = { intent: 'other', propertyType: 'any', sentiment: 'neutral' };
     if (openaiService) {
@@ -142,12 +231,12 @@ class MessageService {
         console.log('Erro ao analisar intenção, usando padrão:', error.message);
       }
     }
-    
+
     // Atualizar perfil com base na análise
     if (intent && intent.intent !== 'other') {
       this.updateUserProfile(from, intent);
     }
-    
+
     // Primeira interação ou reset
     if (!session.started || lowerText === 'menu' || lowerText === 'início' || lowerText === 'inicio') {
       await this.sendWelcomeMessage(from, profile.name);
@@ -155,52 +244,52 @@ class MessageService {
       session.state = this.menuOptions.MAIN;
       return;
     }
-    
+
     // Roteamento inteligente baseado em intenção
     if (intent.intent === 'buy' && session.state === this.menuOptions.MAIN) {
       session.state = this.menuOptions.BUYING;
       await this.handleBuyingIntent(from, text, intent, session, profile);
       return;
     }
-    
+
     if (intent.intent === 'rent' && session.state === this.menuOptions.MAIN) {
       session.state = this.menuOptions.RENTING;
       await this.handleRentingIntent(from, text, intent, session, profile);
       return;
     }
-    
+
     // Processar baseado no estado atual
     switch (session.state) {
       case this.menuOptions.MAIN:
         await this.handleMainMenu(from, lowerText, session);
         break;
-        
+
       case this.menuOptions.BUYING:
       case this.menuOptions.RENTING:
         await this.handlePropertySearch(from, text, intent, session, profile);
         break;
-        
+
       case this.menuOptions.VIEWING_PROPERTY:
         await this.handlePropertyViewing(from, text, session, profile);
         break;
-        
+
       case this.menuOptions.SCHEDULE:
         await this.handleScheduleFlow(from, text, session, profile);
         break;
-        
+
       case this.menuOptions.SELLING:
         await this.handleSellingFlow(from, text, session, profile);
         break;
-        
+
       case this.menuOptions.CONTACT:
         await this.handleContactFlow(from, text, session);
         break;
-        
+
       default:
         await this.handleGeneralQuery(from, text, profile);
     }
   }
-  
+
   // Lidar com intenção de compra
   async handleBuyingIntent(from, text, intent, session, profile) {
     // Buscar imóveis baseado na análise
@@ -212,9 +301,9 @@ class MessageService {
       bedrooms: intent.bedrooms,
       city: intent.location
     };
-    
+
     const properties = searchProperties(filters);
-    
+
     if (properties.length > 0) {
       // Gerar sugestões personalizadas com IA
       let suggestions = null;
@@ -228,20 +317,20 @@ class MessageService {
           console.log('Erro ao gerar sugestões personalizadas');
         }
       }
-      
+
       const introMessage = `🎯 Excelente! Baseado no que você me disse, encontrei ${properties.length} imóveis que podem te interessar.\n\n${suggestions || 'Vou te mostrar os melhores:'}`;
-      
+
       await evolutionService.sendTextMessage(from, introMessage);
-      
+
       // Enviar top 3 imóveis
       await this.delay(1500);
       await this.sendPropertyCarousel(from, properties.slice(0, 3), profile);
-      
+
     } else {
       await this.sendNoResultsMessage(from, filters);
     }
   }
-  
+
   // Lidar com intenção de aluguel
   async handleRentingIntent(from, text, intent, session, profile) {
     // Similar ao buying mas com transaction: 'rent'
@@ -253,22 +342,22 @@ class MessageService {
       bedrooms: intent.bedrooms,
       city: intent.location
     };
-    
+
     const properties = searchProperties(filters);
-    
+
     if (properties.length > 0) {
       await evolutionService.sendTextMessage(
         from,
         `🔑 Encontrei ${properties.length} imóveis para alugar com suas características!`
       );
-      
+
       await this.delay(1500);
       await this.sendPropertyCarousel(from, properties.slice(0, 3), profile);
     } else {
       await this.sendNoResultsMessage(from, filters);
     }
   }
-  
+
   // Busca inteligente de imóveis
   async handlePropertySearch(from, text, intent, session, profile) {
     // Se já tem filtros na sessão, refinar busca
@@ -288,18 +377,18 @@ class MessageService {
         city: intent.location
       };
     }
-    
+
     const properties = searchProperties(session.searchFilters);
-    
+
     if (properties.length === 0) {
       await this.sendNoResultsMessage(from, session.searchFilters);
       return;
     }
-    
+
     // Enviar resultados
     const responseBase = `Encontrei ${properties.length} imóveis com suas características! 🏠`;
     let enhancedResponse = responseBase;
-    
+
     if (openaiService) {
       try {
         enhancedResponse = await openaiService.enhanceResponse(text, responseBase, { userId: from });
@@ -307,14 +396,14 @@ class MessageService {
         console.log('Usando resposta padrão');
       }
     }
-    
+
     await evolutionService.sendTextMessage(from, enhancedResponse);
     await this.delay(1000);
-    
+
     // Enviar carrossel de imóveis
     await this.sendPropertyCarousel(from, properties.slice(0, 3), profile);
   }
-  
+
   // Enviar carrossel de imóveis
   async sendPropertyCarousel(from, properties, profile) {
     for (const property of properties) {
@@ -327,31 +416,31 @@ class MessageService {
           console.log('Usando descrição padrão');
         }
       }
-      
+
       // Criar card do imóvel
       const card = this.createPropertyCard(property, enhancedDescription);
-      
+
       // Enviar imagem
       if (property.images && property.images[0]) {
         await evolutionService.sendImageMessage(from, property.images[0], card);
       } else {
         await evolutionService.sendTextMessage(from, card);
       }
-      
+
       await this.delay(2000);
     }
-    
+
     // Opções após mostrar imóveis
     await this.sendPropertyActions(from, properties);
   }
-  
+
   // Criar card de imóvel
   createPropertyCard(property, enhancedDescription = null) {
     const transaction = property.transaction === 'sale' ? 'Venda' : 'Aluguel';
-    const price = property.transaction === 'sale' 
+    const price = property.transaction === 'sale'
       ? `R$ ${property.price.toLocaleString('pt-BR')}`
       : `R$ ${property.price.toLocaleString('pt-BR')}/mês`;
-      
+
     return `🏠 *${property.title}*
 📍 ${property.neighborhood}, ${property.city}
 
@@ -368,7 +457,7 @@ ${property.features.slice(0, 5).map(f => `• ${f}`).join('\n')}
 🔑 *Código:* ${property.code}
 ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`;
   }
-  
+
   // Enviar ações após mostrar imóveis
   async sendPropertyActions(from, properties) {
     const actions = {
@@ -388,10 +477,10 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
         }
       ]
     };
-    
+
     await evolutionService.sendButtonMessage(from, actions);
   }
-  
+
   // Lidar com menu principal
   async handleMainMenu(from, text, session) {
     if (text.includes('1') || text.includes('comprar')) {
@@ -411,12 +500,12 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
       await this.sendContactInfo(from);
     } else {
       await evolutionService.sendTextMessage(
-        from, 
+        from,
         'Desculpe, não entendi sua opção. Por favor, escolha um número de 1 a 5 ou digite "menu" para ver as opções novamente.'
       );
     }
   }
-  
+
   // Enviar opções de compra
   async sendBuyingOptions(from) {
     const buyingContent = {
@@ -437,10 +526,10 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
         }
       ]
     };
-    
+
     await evolutionService.sendButtonMessage(from, buyingContent);
   }
-  
+
   // Enviar opções de aluguel
   async sendRentingOptions(from) {
     const rentingContent = {
@@ -461,16 +550,16 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
         }
       ]
     };
-    
+
     await evolutionService.sendButtonMessage(from, rentingContent);
   }
-  
+
   // Enviar formulário de venda
   async sendSellingForm(from) {
     const message = messageTemplates.getSellingFormMessage();
     await evolutionService.sendTextMessage(from, message);
   }
-  
+
   // Enviar formulário de agendamento
   async sendScheduleForm(from) {
     await evolutionService.sendTextMessage(
@@ -478,13 +567,13 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
       `📅 *Vamos agendar sua visita!*\n\nPor favor, me informe:\n\n1️⃣ Código do imóvel\n2️⃣ Dia preferido\n3️⃣ Horário preferido\n4️⃣ Seu nome completo\n5️⃣ Telefone para contato\n\nExemplo:\n"APV001, próxima terça, 14h, João Silva, 48999887766"`
     );
   }
-  
+
   // Enviar informações de contato
   async sendContactInfo(from) {
     const contactInfo = messageTemplates.getContactInfo();
     await evolutionService.sendTextMessage(from, contactInfo);
   }
-  
+
   // Lidar com fluxos específicos
   async handleSellingFlow(from, text, session, profile) {
     // Aqui você implementaria a lógica para processar dados do vendedor
@@ -494,7 +583,7 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
     );
     session.state = this.menuOptions.MAIN;
   }
-  
+
   async handleScheduleFlow(from, text, session, profile) {
     // Processar agendamento
     await evolutionService.sendTextMessage(
@@ -503,30 +592,30 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
     );
     session.state = this.menuOptions.MAIN;
   }
-  
+
   async handleContactFlow(from, text, session) {
     // Já enviou as informações, voltar ao menu
     session.state = this.menuOptions.MAIN;
   }
-  
+
   async handlePropertyViewing(from, text, session, profile) {
     // Implementar visualização detalhada de imóvel
     await this.handleMainMenu(from, text, session);
   }
-  
+
   // Lidar com localização
   async handleLocationMessage(from, location, session, profile) {
     const { latitude, longitude } = location;
-    
+
     // Buscar imóveis próximos
     const nearbyProperties = this.findNearbyProperties(latitude, longitude, 5); // 5km raio
-    
+
     if (nearbyProperties.length > 0) {
       await evolutionService.sendTextMessage(
         from,
         `📍 Encontrei ${nearbyProperties.length} imóveis próximos a esta localização!`
       );
-      
+
       await this.sendPropertyCarousel(from, nearbyProperties.slice(0, 3), profile);
     } else {
       await evolutionService.sendTextMessage(
@@ -535,42 +624,42 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
       );
     }
   }
-  
+
   // Buscar imóveis próximos
   findNearbyProperties(lat, lon, radiusKm) {
     const { properties } = require('../data/realEstateData');
-    
+
     return properties.filter(property => {
       if (!property.location) return false;
-      
+
       const distance = this.calculateDistance(
         lat, lon,
         property.location.lat,
         property.location.lng
       );
-      
+
       return distance <= radiusKm;
     });
   }
-  
+
   // Calcular distância entre coordenadas
   calculateDistance(lat1, lon1, lat2, lon2) {
     const R = 6371; // Raio da Terra em km
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   }
-  
+
   // Lidar com consultas gerais
   async handleGeneralQuery(from, text, profile) {
     // Tentar responder perguntas sobre a região
     if (text.includes('bairro') || text.includes('região') || text.includes('onde')) {
       let answer = 'Posso te ajudar com informações sobre os bairros! Temos imóveis em Jurerê Internacional, Lagoa da Conceição, Centro, Campeche e muito mais. Qual região te interessa?';
-      
+
       if (openaiService) {
         try {
           answer = await openaiService.answerLocationQuestion(text);
@@ -578,9 +667,9 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
           console.log('Usando resposta padrão para localização');
         }
       }
-      
+
       await evolutionService.sendTextMessage(from, answer);
-      
+
       await this.delay(2000);
       await evolutionService.sendTextMessage(
         from,
@@ -590,18 +679,18 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
       await this.sendDefaultMessage(from);
     }
   }
-  
+
   // Enviar mensagem de boas-vindas melhorada
   async sendWelcomeMessage(from, name) {
     const hour = new Date().getHours();
     let greeting = 'Bom dia';
-    
+
     if (hour >= 12 && hour < 18) {
       greeting = 'Boa tarde';
     } else if (hour >= 18) {
       greeting = 'Boa noite';
     }
-    
+
     const welcomeText = `${greeting}, ${name}! 👋
 
 Bem-vindo à *Imobiliária Premium Floripa*! 🏠✨
@@ -611,14 +700,14 @@ Sou Carlos Silva, seu corretor virtual com 15 anos de experiência no mercado im
 Temos *30 imóveis exclusivos* disponíveis, desde studios modernos até mansões de frente para o mar! 🌊
 
 Como posso ajudar você hoje?`;
-    
+
     await evolutionService.sendTextMessage(from, welcomeText);
     await this.delay(2000);
-    
+
     // Menu interativo
     await this.sendInteractiveMenu(from);
   }
-  
+
   // Menu interativo melhorado
   async sendInteractiveMenu(from) {
     const menu = {
@@ -668,45 +757,45 @@ Como posso ajudar você hoje?`;
         }
       ]
     };
-    
+
     await evolutionService.sendListMessage(from, menu);
   }
-  
+
   // Lidar com respostas de lista
   async handleListResponse(from, listResponse, session, profile) {
     const selectedId = listResponse.singleSelectReply?.selectedRowId;
-    
+
     if (!selectedId) return;
-    
+
     switch (selectedId) {
       case 'buy_house':
         session.state = this.menuOptions.BUYING;
         session.searchFilters = { type: 'house', transaction: 'sale' };
         await this.handleBuyingIntent(from, 'quero comprar casa', { propertyType: 'house' }, session, profile);
         break;
-        
+
       case 'buy_apartment':
         session.state = this.menuOptions.BUYING;
         session.searchFilters = { type: 'apartment', transaction: 'sale' };
         await this.handleBuyingIntent(from, 'quero comprar apartamento', { propertyType: 'apartment' }, session, profile);
         break;
-        
+
       case 'rent':
         session.state = this.menuOptions.RENTING;
         await this.sendRentingOptions(from);
         break;
-        
+
       case 'sell':
         session.state = this.menuOptions.SELLING;
         await this.sendSellingForm(from);
         break;
-        
+
       case 'featured':
         const featured = getFeaturedProperties();
         await evolutionService.sendTextMessage(from, '⭐ *Imóveis em Destaque desta Semana!*');
         await this.sendPropertyCarousel(from, featured.slice(0, 3), profile);
         break;
-        
+
       case 'regions':
         await evolutionService.sendTextMessage(
           from,
@@ -715,53 +804,53 @@ Como posso ajudar você hoje?`;
         break;
     }
   }
-  
+
   // Lidar com respostas de botão
   async handleButtonResponse(from, buttonResponse, session, profile) {
     const selectedId = buttonResponse.selectedButtonId;
-    
+
     switch (selectedId) {
       case 'house':
       case 'apartment':
       case 'land':
-        session.searchFilters = { 
-          ...session.searchFilters, 
+        session.searchFilters = {
+          ...session.searchFilters,
           type: selectedId,
           transaction: 'sale'
         };
         await this.handlePropertySearch(from, `procuro ${selectedId}`, { propertyType: selectedId }, session, profile);
         break;
-        
+
       case 'rent_house':
       case 'rent_apartment':
       case 'rent_commercial':
         const type = selectedId.replace('rent_', '');
-        session.searchFilters = { 
+        session.searchFilters = {
           type: type,
           transaction: 'rent'
         };
         await this.handlePropertySearch(from, `alugar ${type}`, { propertyType: type }, session, profile);
         break;
-        
+
       case 'schedule_visit':
         session.state = this.menuOptions.SCHEDULE;
         await this.sendScheduleForm(from);
         break;
-        
+
       case 'see_more':
         await evolutionService.sendTextMessage(
           from,
           'Claro! Me conta mais detalhes do que você procura:\n\n• Localização preferida?\n• Faixa de preço?\n• Quantidade de quartos?\n• Alguma característica especial?'
         );
         break;
-        
+
       case 'talk_agent':
         session.state = this.menuOptions.CONTACT;
         await this.sendContactInfo(from);
         break;
     }
   }
-  
+
   // Mensagem quando não há resultados
   async sendNoResultsMessage(from, filters) {
     const response = `😔 No momento não encontrei imóveis com essas características específicas.
@@ -772,10 +861,10 @@ Mas não desanime! Posso:
 3️⃣ Mostrar opções próximas ao que procura
 
 O que prefere?`;
-    
+
     await evolutionService.sendTextMessage(from, response);
   }
-  
+
   // Gerenciar perfil do usuário
   getUserProfile(userId, name = 'Cliente') {
     if (!userProfiles.has(userId)) {
@@ -792,36 +881,36 @@ O que prefere?`;
         lastInteraction: Date.now()
       });
     }
-    
+
     const profile = userProfiles.get(userId);
     profile.interactions++;
     profile.lastInteraction = Date.now();
-    
+
     return profile;
   }
-  
+
   // Atualizar perfil com base em intenções
   updateUserProfile(userId, intent) {
     const profile = userProfiles.get(userId);
     if (!profile) return;
-    
+
     if (intent.propertyType && intent.propertyType !== 'any') {
       profile.preferences.type = intent.propertyType;
     }
-    
+
     if (intent.priceRange) {
       profile.preferences.priceRange = intent.priceRange;
     }
-    
+
     if (intent.location && !profile.preferences.locations.includes(intent.location)) {
       profile.preferences.locations.push(intent.location);
     }
-    
+
     if (intent.features && intent.features.length > 0) {
       profile.preferences.features = [...new Set([...profile.preferences.features, ...intent.features])];
     }
   }
-  
+
   // Gerenciar sessão do usuário
   getUserSession(userId) {
     if (!userSessions.has(userId)) {
@@ -836,19 +925,19 @@ O que prefere?`;
     }
     return userSessions.get(userId);
   }
-  
+
   // Helpers
   delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
-  
+
   async sendErrorMessage(from) {
     await evolutionService.sendTextMessage(
       from,
       '❌ Ops! Ocorreu um erro. Por favor, tente novamente ou digite "menu" para reiniciar.'
     );
   }
-  
+
   async sendDefaultMessage(from) {
     await evolutionService.sendTextMessage(
       from,

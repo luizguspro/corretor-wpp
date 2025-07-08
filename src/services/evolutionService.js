@@ -185,17 +185,50 @@ class EvolutionService {
   // Enviar mensagem com botões
   async sendButtonMessage(number, content) {
     try {
-      const response = await this.api.post(`/message/sendButtons/${evolutionConfig.instanceName}`, {
+      // Estrutura correta para Evolution API v1
+      const buttonMessage = {
         number: this.formatPhoneNumber(number),
-        title: content.title,
-        description: content.description,
-        footer: content.footer || 'Powered by Bot Corretor',
-        buttons: content.buttons
-      });
+        options: {
+          delay: 1200,
+          presence: 'composing'
+        },
+        buttonMessage: {
+          title: content.title,
+          description: content.description,
+          footer: content.footer || 'Powered by Bot Corretor',
+          buttons: content.buttons.map(button => ({
+            buttonText: {
+              displayText: button.buttonText?.displayText || button.buttonText
+            },
+            buttonId: button.buttonId
+          }))
+        }
+      };
+      
+      logger.info(`Enviando botões para ${number}:`, JSON.stringify(buttonMessage, null, 2));
+      
+      const response = await this.api.post(`/message/sendButtons/${evolutionConfig.instanceName}`, buttonMessage);
       
       return response.data;
     } catch (error) {
       logger.error(`Erro ao enviar mensagem com botões: ${error.message}`);
+      
+      // Se falhar, tentar enviar como mensagem de texto
+      if (error.response?.status === 400) {
+        logger.info('Botões falharam, enviando como texto...');
+        
+        let textMessage = `${content.title}\n\n${content.description}\n\n`;
+        
+        content.buttons.forEach((button, index) => {
+          const text = button.buttonText?.displayText || button.buttonText;
+          textMessage += `${index + 1}. ${text}\n`;
+        });
+        
+        textMessage += `\n_${content.footer || 'Digite o número da opção desejada'}_`;
+        
+        return await this.sendTextMessage(number, textMessage);
+      }
+      
       throw error;
     }
   }
@@ -203,18 +236,60 @@ class EvolutionService {
   // Enviar lista
   async sendListMessage(number, content) {
     try {
-      const response = await this.api.post(`/message/sendList/${evolutionConfig.instanceName}`, {
+      // Estrutura correta para Evolution API v1
+      const listMessage = {
         number: this.formatPhoneNumber(number),
-        title: content.title,
-        description: content.description,
-        buttonText: content.buttonText || 'Ver opções',
-        footerText: content.footer || 'Powered by Bot Corretor',
-        sections: content.sections
-      });
+        options: {
+          delay: 1200,
+          presence: 'composing'
+        },
+        listMessage: {
+          title: content.title,
+          description: content.description,
+          buttonText: content.buttonText || 'Ver opções',
+          footerText: content.footer || 'Powered by Bot Corretor',
+          sections: content.sections.map(section => ({
+            title: section.title,
+            rows: section.rows.map(row => ({
+              title: row.title,
+              rowId: row.rowId,
+              description: row.description || ''
+            }))
+          }))
+        }
+      };
+      
+      logger.info(`Enviando lista para ${number}:`, JSON.stringify(listMessage, null, 2));
+      
+      const response = await this.api.post(`/message/sendList/${evolutionConfig.instanceName}`, listMessage);
       
       return response.data;
     } catch (error) {
       logger.error(`Erro ao enviar lista: ${error.message}`);
+      
+      // Se falhar, tentar enviar como mensagem de texto com botões
+      if (error.response?.status === 400) {
+        logger.info('Lista falhou, tentando enviar como mensagem com botões...');
+        
+        // Converter lista em mensagem de texto formatada
+        let textMessage = `${content.title}\n\n${content.description}\n\n`;
+        
+        content.sections.forEach(section => {
+          textMessage += `*${section.title}*\n`;
+          section.rows.forEach(row => {
+            textMessage += `• ${row.title}\n`;
+            if (row.description) {
+              textMessage += `  _${row.description}_\n`;
+            }
+          });
+          textMessage += '\n';
+        });
+        
+        textMessage += `_${content.footer || 'Powered by Bot Corretor'}_`;
+        
+        return await this.sendTextMessage(number, textMessage);
+      }
+      
       throw error;
     }
   }
@@ -222,16 +297,53 @@ class EvolutionService {
   // Enviar imagem
   async sendImageMessage(number, media, caption = '') {
     try {
-      const response = await this.api.post(`/message/sendMedia/${evolutionConfig.instanceName}`, {
+      // Estrutura correta para Evolution API v1
+      const mediaMessage = {
         number: this.formatPhoneNumber(number),
-        mediatype: 'image',
-        media: media,
-        caption: caption
-      });
+        options: {
+          delay: 1200,
+          presence: 'composing'
+        },
+        mediaMessage: {
+          mediatype: 'image',
+          media: media,
+          caption: caption
+        }
+      };
+      
+      logger.info(`Enviando imagem para ${number}:`, JSON.stringify(mediaMessage, null, 2));
+      
+      const response = await this.api.post(`/message/sendMedia/${evolutionConfig.instanceName}`, mediaMessage);
       
       return response.data;
     } catch (error) {
       logger.error(`Erro ao enviar imagem: ${error.message}`);
+      
+      // Se falhar, tentar estrutura alternativa
+      if (error.response?.status === 400) {
+        logger.info('Primeira tentativa falhou, tentando estrutura alternativa...');
+        
+        try {
+          // Estrutura alternativa
+          const altMediaMessage = {
+            number: this.formatPhoneNumber(number),
+            media: media,
+            mediatype: 'image',
+            caption: caption
+          };
+          
+          const altResponse = await this.api.post(`/message/sendMedia/${evolutionConfig.instanceName}`, altMediaMessage);
+          return altResponse.data;
+        } catch (altError) {
+          logger.error('Estrutura alternativa também falhou');
+          
+          // Última tentativa: enviar só o texto com link
+          logger.info('Enviando como texto com link da imagem...');
+          const textMessage = `${caption}\n\n🔗 Veja a imagem: ${media}`;
+          return await this.sendTextMessage(number, textMessage);
+        }
+      }
+      
       throw error;
     }
   }

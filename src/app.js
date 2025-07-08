@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const morgan = require('morgan');
+const axios = require('axios');
 const evolutionService = require('./services/evolutionService');
 const webhookController = require('./controllers/webhookController');
 
@@ -60,6 +61,135 @@ app.post('/restart', async (req, res) => {
   }
 });
 
+// Rota para desconectar WhatsApp atual
+app.post('/disconnect', async (req, res) => {
+  try {
+    // Desconectar a instância atual
+    const response = await axios.delete(
+      `${process.env.EVOLUTION_API_URL}/instance/logout/${process.env.INSTANCE_NAME}`,
+      {
+        headers: {
+          'apikey': process.env.EVOLUTION_API_KEY
+        }
+      }
+    );
+    
+    res.json({ 
+      message: 'WhatsApp desconectado! Reinicie o bot para conectar outro número.',
+      response: response.data 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Erro ao desconectar',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Rota para deletar instância completamente
+app.delete('/instance', async (req, res) => {
+  try {
+    const response = await axios.delete(
+      `${process.env.EVOLUTION_API_URL}/instance/delete/${process.env.INSTANCE_NAME}`,
+      {
+        headers: {
+          'apikey': process.env.EVOLUTION_API_KEY
+        }
+      }
+    );
+    
+    res.json({ 
+      message: 'Instância deletada! Reinicie o bot para criar uma nova.',
+      response: response.data 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Erro ao deletar instância',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Rota para forçar reconexão
+app.post('/force-reconnect', async (req, res) => {
+  try {
+    const result = await evolutionService.forceReconnect();
+    
+    if (result && result.code) {
+      res.json({ 
+        message: 'QR Code gerado! Escaneie com seu WhatsApp',
+        qrcode: result.code 
+      });
+    } else {
+      res.json({ 
+        message: 'Reconexão iniciada. Verifique o terminal para o QR Code',
+        result 
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Erro ao forçar reconexão',
+      details: error.message 
+    });
+  }
+});
+
+// Rota para resetar instância completamente
+app.post('/reset-instance', async (req, res) => {
+  try {
+    const result = await evolutionService.resetInstance();
+    
+    res.json({ 
+      message: 'Instância resetada! Novo QR Code disponível',
+      result 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Erro ao resetar instância',
+      details: error.message 
+    });
+  }
+});
+
+// Rota para teste de lista
+app.post('/test/list', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    
+    const testList = {
+      title: '🧪 Teste de Lista',
+      description: 'Esta é uma lista de teste',
+      buttonText: 'Clique Aqui',
+      sections: [
+        {
+          title: 'Seção 1',
+          rows: [
+            {
+              rowId: 'test1',
+              title: 'Opção 1',
+              description: 'Descrição da opção 1'
+            },
+            {
+              rowId: 'test2',
+              title: 'Opção 2',
+              description: 'Descrição da opção 2'
+            }
+          ]
+        }
+      ]
+    };
+    
+    const result = await evolutionService.sendListMessage(phone, testList);
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      details: error.response?.data 
+    });
+  }
+});
+
 // Tratamento de erros
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -73,6 +203,19 @@ app.use((err, req, res, next) => {
 async function initializeBot() {
   try {
     console.log('🤖 Iniciando Bot Corretor WhatsApp...\n');
+    
+    // CONFIGURAÇÃO DE RESET - Mude para true se precisar forçar reset
+    const FORCE_RESET = false; // Mude para true se estiver com problemas de conexão
+    
+    if (FORCE_RESET) {
+      console.log('⚠️ FORÇANDO RESET DA INSTÂNCIA...');
+      try {
+        await evolutionService.resetInstance();
+        console.log('✅ Instância resetada com sucesso!');
+      } catch (error) {
+        console.log('Continuando mesmo com erro no reset...');
+      }
+    }
     
     // Verificar/criar instância
     console.log('1️⃣ Verificando instância...');
@@ -225,6 +368,10 @@ async function initializeBot() {
       console.log(`📱 QR Code disponível em: http://localhost:${PORT}/qrcode`);
       console.log('\n✨ Bot pronto para receber mensagens!');
       console.log('📱 Envie "menu" no WhatsApp para começar!\n');
+      console.log('\n🛠️ Comandos úteis:');
+      console.log('- Forçar reconexão: http://localhost:' + PORT + '/force-reconnect');
+      console.log('- Resetar instância: http://localhost:' + PORT + '/reset-instance');
+      console.log('- Desconectar: http://localhost:' + PORT + '/disconnect\n');
     });
     
   } catch (error) {

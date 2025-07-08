@@ -9,6 +9,12 @@ class OpenAIService {
     this.apiKey = process.env.OPENAI_API_KEY;
     this.apiUrl = 'https://api.openai.com/v1';
     
+    // Verificar se a API key existe
+    if (!this.apiKey) {
+      console.warn('⚠️ OpenAI API Key não configurada');
+      return;
+    }
+    
     this.api = axios.create({
       baseURL: this.apiUrl,
       headers: {
@@ -50,13 +56,98 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
     this.conversationCache = new Map();
   }
   
+  // Transcrever áudio para texto - CORRIGIDO
+  async transcribeAudio(audioData, mimeType = 'audio/ogg') {
+    try {
+      if (!this.apiKey) {
+        throw new Error('OpenAI API Key não configurada');
+      }
+      
+      console.log('🎤 Iniciando transcrição de áudio...');
+      
+      // Criar diretório temporário se não existir
+      const tempDir = path.join(__dirname, '../../temp');
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      
+      // Determinar extensão baseada no mimeType
+      let extension = 'ogg';
+      if (mimeType.includes('mp4')) extension = 'mp4';
+      if (mimeType.includes('mpeg')) extension = 'mp3';
+      if (mimeType.includes('wav')) extension = 'wav';
+      if (mimeType.includes('webm')) extension = 'webm';
+      
+      const tempPath = path.join(tempDir, `audio_${Date.now()}.${extension}`);
+      
+      // Salvar áudio
+      if (Buffer.isBuffer(audioData)) {
+        fs.writeFileSync(tempPath, audioData);
+      } else if (typeof audioData === 'string') {
+        // Se for base64
+        const buffer = Buffer.from(audioData, 'base64');
+        fs.writeFileSync(tempPath, buffer);
+      } else {
+        throw new Error('Formato de áudio não reconhecido');
+      }
+      
+      console.log(`📁 Áudio salvo em: ${tempPath}`);
+      console.log(`📊 Tamanho: ${fs.statSync(tempPath).size} bytes`);
+      
+      // Criar FormData
+      const formData = new FormData();
+      formData.append('file', fs.createReadStream(tempPath));
+      formData.append('model', 'whisper-1');
+      formData.append('language', 'pt');
+      formData.append('response_format', 'json');
+      
+      // Fazer requisição
+      console.log('📤 Enviando para OpenAI Whisper...');
+      const response = await axios.post(
+        `${this.apiUrl}/audio/transcriptions`,
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            ...formData.getHeaders()
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
+      );
+      
+      // Limpar arquivo temporário
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (e) {
+        console.warn('Não foi possível deletar arquivo temporário');
+      }
+      
+      console.log('✅ Transcrição concluída:', response.data.text);
+      return response.data.text;
+      
+    } catch (error) {
+      console.error('❌ Erro ao transcrever áudio:', error.response?.data || error.message);
+      
+      // Log mais detalhado do erro
+      if (error.response) {
+        console.error('Status:', error.response.status);
+        console.error('Data:', error.response.data);
+      }
+      
+      throw new Error('Não foi possível transcrever o áudio. ' + (error.response?.data?.error?.message || error.message));
+    }
+  }
+  
   // Melhorar resposta usando GPT
   async enhanceResponse(userMessage, botResponse, context = {}) {
     try {
+      if (!this.apiKey) return botResponse;
+      
       const messages = this.buildConversationContext(context.userId, userMessage, botResponse);
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-4-1106-preview', // ou gpt-3.5-turbo para economizar
+        model: 'gpt-3.5-turbo', // Use gpt-4 se tiver acesso
         messages: messages,
         temperature: 0.7,
         max_tokens: 500,
@@ -72,7 +163,6 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       return enhancedResponse;
     } catch (error) {
       console.error('Erro ao melhorar resposta:', error.message);
-      // Retorna resposta original em caso de erro
       return botResponse;
     }
   }
@@ -80,6 +170,14 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
   // Analisar intenção do usuário
   async analyzeIntent(userMessage, context = {}) {
     try {
+      if (!this.apiKey) {
+        return {
+          intent: 'other',
+          propertyType: 'any',
+          sentiment: 'neutral'
+        };
+      }
+      
       const response = await this.api.post('/chat/completions', {
         model: 'gpt-3.5-turbo',
         messages: [
@@ -122,6 +220,8 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
   // Gerar descrição criativa para imóvel
   async generatePropertyDescription(property) {
     try {
+      if (!this.apiKey) return property.description;
+      
       const prompt = `Crie uma descrição atraente e vendedora para este imóvel:
       
 Tipo: ${property.type === 'house' ? 'Casa' : 'Apartamento'}
@@ -155,54 +255,11 @@ A descrição deve:
     }
   }
   
-  // Transcrever áudio para texto
-  async transcribeAudio(audioBuffer, format = 'ogg') {
-    try {
-      const formData = new FormData();
-      
-      // Criar arquivo temporário
-      const tempPath = path.join(__dirname, `../../temp/audio_${Date.now()}.${format}`);
-      
-      // Garantir que o diretório existe
-      const tempDir = path.dirname(tempPath);
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-      
-      // Salvar buffer em arquivo
-      fs.writeFileSync(tempPath, audioBuffer);
-      
-      // Adicionar ao form
-      formData.append('file', fs.createReadStream(tempPath));
-      formData.append('model', 'whisper-1');
-      formData.append('language', 'pt');
-      formData.append('response_format', 'json');
-      
-      // Fazer requisição
-      const response = await axios.post(
-        `${this.apiUrl}/audio/transcriptions`,
-        formData,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
-            ...formData.getHeaders()
-          }
-        }
-      );
-      
-      // Limpar arquivo temporário
-      fs.unlinkSync(tempPath);
-      
-      return response.data.text;
-    } catch (error) {
-      console.error('Erro ao transcrever áudio:', error);
-      throw new Error('Não foi possível transcrever o áudio');
-    }
-  }
-  
   // Gerar sugestões personalizadas
   async generatePersonalizedSuggestions(userProfile, availableProperties) {
     try {
+      if (!this.apiKey) return null;
+      
       const prompt = `Baseado no perfil do cliente e nos imóveis disponíveis, sugira os 3 melhores:
       
 Perfil do Cliente:
@@ -236,6 +293,10 @@ Forneça:
   // Responder perguntas sobre a região
   async answerLocationQuestion(question) {
     try {
+      if (!this.apiKey) {
+        return 'Desculpe, não consegui processar sua pergunta no momento.';
+      }
+      
       const prompt = `Responda esta pergunta sobre a região de Florianópolis/Balneário Camboriú:
       
 "${question}"
@@ -326,44 +387,3 @@ Seja objetivo mas completo.`;
 }
 
 module.exports = new OpenAIService();
-
-// ===== EXEMPLO DE USO NO messageService.js =====
-/*
-const openaiService = require('./openaiService');
-
-// No método handleTextMessage:
-async handleTextMessage(from, text, session, pushName) {
-  // Analisar intenção
-  const intent = await openaiService.analyzeIntent(text, { userId: from });
-  
-  // Gerar resposta base
-  let response = this.generateBaseResponse(intent, session);
-  
-  // Melhorar resposta com GPT
-  const enhancedResponse = await openaiService.enhanceResponse(
-    text, 
-    response, 
-    { userId: from }
-  );
-  
-  // Enviar resposta melhorada
-  await evolutionService.sendTextMessage(from, enhancedResponse);
-}
-
-// Para áudio:
-async handleAudioMessage(from, audioData) {
-  try {
-    // Transcrever áudio
-    const text = await openaiService.transcribeAudio(audioData.buffer);
-    
-    // Processar como texto normal
-    await this.handleTextMessage(from, text, session, pushName);
-    
-  } catch (error) {
-    await evolutionService.sendTextMessage(
-      from, 
-      'Desculpe, não consegui entender o áudio. Pode escrever sua mensagem?'
-    );
-  }
-}
-*/
