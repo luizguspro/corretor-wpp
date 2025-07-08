@@ -2,7 +2,7 @@
 const evolutionService = require('./evolutionService');
 const messageTemplates = require('../utils/messageTemplates');
 const { searchProperties, getPropertyById, getFeaturedProperties } = require('../data/realEstateData');
-const axios = require('axios'); // ADICIONADO
+const axios = require('axios');
 
 // Importar OpenAI apenas se estiver configurado
 let openaiService = null;
@@ -92,7 +92,7 @@ class MessageService {
     }
   }
 
-  // Lidar com mensagens de áudio - CORRIGIDO
+  // Lidar com mensagens de áudio - CORRIGIDO COM CAMPO BODY
   async handleAudioMessage(from, audioMessage, session, profile) {
     try {
       await evolutionService.sendTextMessage(from, '🎤 Recebendo seu áudio...');
@@ -109,51 +109,105 @@ class MessageService {
       console.log('🎧 Processando áudio:', {
         mimetype: audioMessage.mimetype,
         fileLength: audioMessage.fileLength,
-        seconds: audioMessage.seconds
+        seconds: audioMessage.seconds,
+        keys: Object.keys(audioMessage)
       });
+
+      // DEBUG: Mostrar todos os campos disponíveis
+      console.log('🔍 Campos disponíveis no audioMessage:', Object.keys(audioMessage));
+      console.log('📦 Tem body?', audioMessage.body ? `Sim (${audioMessage.body.length} chars)` : 'Não');
 
       // Evolution API pode enviar o áudio de diferentes formas
       let audioBuffer = null;
+      let audioUrl = null;
 
-      if (audioMessage.base64) {
-        // Se vier em base64
-        console.log('📦 Áudio em base64 detectado');
-        audioBuffer = Buffer.from(audioMessage.base64, 'base64');
-      } else if (audioMessage.data) {
-        // Às vezes vem como 'data'
-        console.log('📦 Áudio em data detectado');
-        audioBuffer = Buffer.from(audioMessage.data, 'base64');
-      } else if (audioMessage.url) {
-        // Se vier como URL, fazer download
-        console.log('🔗 URL de áudio detectada:', audioMessage.url);
+      // Primeiro, tentar pegar URL do áudio
+      audioUrl = audioMessage.url || 
+                 audioMessage.mediaUrl || 
+                 audioMessage.fileUrl || 
+                 audioMessage.directPath;
+
+      // Se tem URL e ela começa com http, fazer download
+      if (audioUrl && audioUrl.startsWith('http')) {
+        console.log('🔗 URL de áudio detectada:', audioUrl);
         try {
-          const response = await axios.get(audioMessage.url, {
-            responseType: 'arraybuffer'
+          // Se a URL é da Evolution API, adicionar headers de autenticação
+          const headers = {};
+          if (audioUrl.includes(process.env.EVOLUTION_API_URL)) {
+            headers['apikey'] = process.env.EVOLUTION_API_KEY;
+          }
+
+          const response = await axios.get(audioUrl, {
+            responseType: 'arraybuffer',
+            headers: headers,
+            timeout: 30000 // 30 segundos timeout
           });
+          
           audioBuffer = Buffer.from(response.data);
+          console.log(`✅ Áudio baixado: ${audioBuffer.length} bytes`);
         } catch (error) {
-          console.error('Erro ao baixar áudio:', error);
-          throw new Error('Não consegui baixar o áudio');
+          console.error('Erro ao baixar áudio:', error.message);
+          // Continuar para tentar outros métodos
         }
-      } else {
-        // Tentar outras propriedades comuns
-        const possibleKeys = ['fileEncSha256', 'fileSha256', 'mediaKey', 'directPath'];
-        for (const key of possibleKeys) {
-          if (audioMessage[key]) {
-            console.log(`📦 Tentando usar ${key} como áudio`);
+      }
+
+      // Se não conseguiu por URL, tentar base64
+      if (!audioBuffer) {
+        // Lista de possíveis campos com base64 - BODY ADICIONADO AQUI!
+        const base64Fields = ['body', 'base64', 'data', 'fileData', 'content'];
+        
+        for (const field of base64Fields) {
+          if (audioMessage[field]) {
+            console.log(`📦 Tentando extrair áudio de: ${field}`);
             try {
-              audioBuffer = Buffer.from(audioMessage[key], 'base64');
-              break;
+              // Remover header data:audio se existir
+              let base64Data = audioMessage[field];
+              if (base64Data.includes('base64,')) {
+                base64Data = base64Data.split('base64,')[1];
+              }
+              
+              audioBuffer = Buffer.from(base64Data, 'base64');
+              if (audioBuffer.length > 0) {
+                console.log(`✅ Áudio extraído de ${field}: ${audioBuffer.length} bytes`);
+                break;
+              }
             } catch (e) {
-              console.log(`❌ ${key} não é base64 válido`);
+              console.log(`❌ ${field} não é base64 válido`);
             }
           }
         }
       }
 
+      // Se ainda não tem buffer, tentar pegar via Evolution API
+      if (!audioBuffer && audioMessage.id) {
+        console.log('🔄 Tentando baixar áudio via Evolution API...');
+        try {
+          // Tentar endpoint de download de mídia
+          const mediaResponse = await axios.get(
+            `${process.env.EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${process.env.INSTANCE_NAME}`,
+            {
+              params: {
+                messageId: audioMessage.id,
+                remoteJid: from
+              },
+              headers: {
+                'apikey': process.env.EVOLUTION_API_KEY
+              }
+            }
+          );
+
+          if (mediaResponse.data && mediaResponse.data.base64) {
+            audioBuffer = Buffer.from(mediaResponse.data.base64, 'base64');
+            console.log('✅ Áudio obtido via API');
+          }
+        } catch (error) {
+          console.error('Erro ao obter mídia via API:', error.message);
+        }
+      }
+
       if (!audioBuffer || audioBuffer.length === 0) {
         console.error('❌ Não foi possível extrair o áudio da mensagem');
-        console.log('Estrutura do audioMessage:', JSON.stringify(audioMessage, null, 2));
+        console.log('Estrutura completa do audioMessage:', JSON.stringify(audioMessage, null, 2));
 
         await evolutionService.sendTextMessage(
           from,
@@ -162,7 +216,17 @@ class MessageService {
         return;
       }
 
-      console.log(`✅ Buffer de áudio criado: ${audioBuffer.length} bytes`);
+      console.log(`✅ Buffer de áudio pronto: ${audioBuffer.length} bytes`);
+
+      // Verificar se o áudio não é muito grande (limite de 25MB do Whisper)
+      const maxSize = 25 * 1024 * 1024; // 25MB
+      if (audioBuffer.length > maxSize) {
+        await evolutionService.sendTextMessage(
+          from,
+          '😔 O áudio é muito grande (máximo 25MB). Por favor, envie um áudio mais curto.'
+        );
+        return;
+      }
 
       // Transcrever com OpenAI
       let transcription = '';
@@ -190,6 +254,8 @@ class MessageService {
           errorMessage += 'Problema com a configuração da API.';
         } else if (error.message.includes('format')) {
           errorMessage += 'O formato do áudio não é suportado.';
+        } else if (error.message.includes('size')) {
+          errorMessage += 'O áudio é muito grande.';
         } else {
           errorMessage += 'Pode tentar novamente ou digitar sua mensagem?';
         }

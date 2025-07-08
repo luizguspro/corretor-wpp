@@ -56,7 +56,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
     this.conversationCache = new Map();
   }
   
-  // Transcrever áudio para texto - CORRIGIDO
+  // Transcrever áudio para texto - CORRIGIDO E MELHORADO
   async transcribeAudio(audioData, mimeType = 'audio/ogg') {
     try {
       if (!this.apiKey) {
@@ -64,6 +64,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       }
       
       console.log('🎤 Iniciando transcrição de áudio...');
+      console.log(`📊 Tipo: ${mimeType}, Tamanho: ${audioData.length} bytes`);
       
       // Criar diretório temporário se não existir
       const tempDir = path.join(__dirname, '../../temp');
@@ -74,11 +75,15 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       // Determinar extensão baseada no mimeType
       let extension = 'ogg';
       if (mimeType.includes('mp4')) extension = 'mp4';
-      if (mimeType.includes('mpeg')) extension = 'mp3';
+      if (mimeType.includes('mpeg') || mimeType.includes('mp3')) extension = 'mp3';
       if (mimeType.includes('wav')) extension = 'wav';
       if (mimeType.includes('webm')) extension = 'webm';
+      if (mimeType.includes('opus')) extension = 'opus';
+      if (mimeType.includes('m4a')) extension = 'm4a';
       
-      const tempPath = path.join(tempDir, `audio_${Date.now()}.${extension}`);
+      // Gerar nome único para o arquivo
+      const tempFileName = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${extension}`;
+      const tempPath = path.join(tempDir, tempFileName);
       
       // Salvar áudio
       if (Buffer.isBuffer(audioData)) {
@@ -92,14 +97,22 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       }
       
       console.log(`📁 Áudio salvo em: ${tempPath}`);
-      console.log(`📊 Tamanho: ${fs.statSync(tempPath).size} bytes`);
+      console.log(`📊 Tamanho do arquivo: ${fs.statSync(tempPath).size} bytes`);
+      
+      // Verificar se o arquivo não está vazio
+      if (fs.statSync(tempPath).size === 0) {
+        throw new Error('Arquivo de áudio vazio');
+      }
       
       // Criar FormData
       const formData = new FormData();
       formData.append('file', fs.createReadStream(tempPath));
       formData.append('model', 'whisper-1');
-      formData.append('language', 'pt');
+      formData.append('language', 'pt'); // Português
       formData.append('response_format', 'json');
+      
+      // Adicionar prompt para melhorar a transcrição em português
+      formData.append('prompt', 'Transcreva o áudio em português brasileiro. O contexto é sobre imóveis, casas, apartamentos, compra, venda ou aluguel.');
       
       // Fazer requisição
       console.log('📤 Enviando para OpenAI Whisper...');
@@ -112,27 +125,66 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
             ...formData.getHeaders()
           },
           maxContentLength: Infinity,
-          maxBodyLength: Infinity
+          maxBodyLength: Infinity,
+          timeout: 60000 // 60 segundos timeout
         }
       );
       
       // Limpar arquivo temporário
       try {
         fs.unlinkSync(tempPath);
+        console.log('🗑️ Arquivo temporário removido');
       } catch (e) {
-        console.warn('Não foi possível deletar arquivo temporário');
+        console.warn('Não foi possível deletar arquivo temporário:', e.message);
       }
       
-      console.log('✅ Transcrição concluída:', response.data.text);
-      return response.data.text;
+      // Validar resposta
+      if (!response.data || !response.data.text) {
+        throw new Error('Resposta inválida da API');
+      }
+      
+      const transcription = response.data.text.trim();
+      console.log('✅ Transcrição concluída:', transcription);
+      
+      // Verificar se a transcrição não está vazia
+      if (!transcription || transcription.length < 3) {
+        throw new Error('Transcrição vazia ou muito curta');
+      }
+      
+      return transcription;
       
     } catch (error) {
       console.error('❌ Erro ao transcrever áudio:', error.response?.data || error.message);
       
+      // Limpar arquivo temporário em caso de erro
+      if (tempPath && fs.existsSync(tempPath)) {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (e) {
+          // Ignorar erro ao deletar
+        }
+      }
+      
       // Log mais detalhado do erro
       if (error.response) {
         console.error('Status:', error.response.status);
-        console.error('Data:', error.response.data);
+        console.error('Headers:', error.response.headers);
+        if (error.response.data) {
+          console.error('Resposta:', JSON.stringify(error.response.data, null, 2));
+        }
+      }
+      
+      // Mensagens de erro mais específicas
+      if (error.response?.status === 401) {
+        throw new Error('API Key inválida ou não autorizada');
+      } else if (error.response?.status === 413) {
+        throw new Error('Áudio muito grande (máximo 25MB)');
+      } else if (error.response?.status === 415) {
+        throw new Error('Formato de áudio não suportado');
+      } else if (error.message.includes('ENOENT')) {
+        throw new Error('Erro ao salvar arquivo temporário');
+      } else if (error.message.includes('timeout')) {
+        throw new Error('Tempo limite excedido ao processar áudio');
       }
       
       throw new Error('Não foi possível transcrever o áudio. ' + (error.response?.data?.error?.message || error.message));

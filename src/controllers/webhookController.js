@@ -26,17 +26,6 @@ class WebhookController {
       logger.info(`Webhook recebido: ${event} - ${instance}`);
       logger.info('Body completo:', JSON.stringify(req.body, null, 2));
       
-      // Log específico para entender a estrutura
-      if (event === 'messages.upsert') {
-        logger.info('📱 Estrutura do data:', JSON.stringify(data, null, 2));
-        logger.info('📱 Chaves do data:', Object.keys(data));
-        
-        // Se tem remoteJid no nível superior
-        if (data.remoteJid) {
-          logger.info('✅ RemoteJid encontrado:', data.remoteJid);
-        }
-      }
-      
       // Verificar se é da instância correta
       if (instance !== process.env.INSTANCE_NAME) {
         logger.warn(`Instância diferente: ${instance} !== ${process.env.INSTANCE_NAME}`);
@@ -84,13 +73,15 @@ class WebhookController {
     try {
       logger.info('handleMessageUpsert - Data recebida:', JSON.stringify(data));
       
-      // Evolution API v1.7.4 envia mensagens em uma estrutura específica
+      // Evolution API envia os dados da mensagem diretamente no data
       let messageToProcess = null;
       
-      // Verificar todas as possíveis estruturas
-      if (data.remoteJid && data.message) {
-        // Estrutura mais comum - mensagem direta
-        logger.info('Estrutura direta detectada');
+      // Se tem key e message, é uma mensagem completa
+      if (data.key && data.message) {
+        messageToProcess = data;
+      } 
+      // Se tem remoteJid e message no nível superior
+      else if (data.remoteJid && data.message) {
         messageToProcess = {
           key: {
             remoteJid: data.remoteJid,
@@ -101,36 +92,47 @@ class WebhookController {
           pushName: data.pushName || 'User',
           messageTimestamp: data.messageTimestamp
         };
-      } else if (data.messages && Array.isArray(data.messages)) {
-        // Array de mensagens
-        logger.info('Array de mensagens detectado');
+      }
+      // Se tem messages array
+      else if (data.messages && Array.isArray(data.messages)) {
         for (const msg of data.messages) {
           await messageService.processMessage(msg);
         }
         return;
-      } else if (data.key && data.message) {
-        // Mensagem com key completa
-        logger.info('Mensagem com key completa');
-        messageToProcess = data;
-      } else {
-        logger.warn('Estrutura não reconhecida. Chaves disponíveis:', Object.keys(data));
+      }
+      
+      // Verificar se é mensagem de áudio
+      if (messageToProcess && messageToProcess.message) {
+        const message = messageToProcess.message;
         
-        // Tentar processar mesmo assim se tiver algo que pareça uma mensagem
-        if (data.extendedTextMessage || data.conversation || data.text) {
-          logger.info('Tentando criar estrutura a partir de mensagem parcial');
-          messageToProcess = {
-            key: {
-              remoteJid: data.remoteJid || 'unknown@s.whatsapp.net',
-              fromMe: false,
-              id: data.id || 'msg-' + Date.now()
-            },
-            message: data.message || data,
-            pushName: data.pushName || 'User'
+        // Evolution API pode enviar áudio em diferentes formatos
+        if (message.audioMessage || message.audio || message.mediaMessage) {
+          logger.info('🎤 Mensagem de áudio detectada!');
+          
+          // Estrutura específica para áudio
+          const audioData = message.audioMessage || message.audio || message.mediaMessage;
+          logger.info('Estrutura do áudio:', JSON.stringify(audioData));
+          
+          // Evolution API geralmente envia o áudio como:
+          // - base64: string base64 do arquivo
+          // - url: URL para download
+          // - mediaUrl: URL alternativa
+          
+          let audioInfo = {
+            ...audioData,
+            mimetype: audioData.mimetype || 'audio/ogg',
+            // Se tem URL, vamos preferir ela
+            url: audioData.url || audioData.mediaUrl || audioData.fileUrl
+          };
+          
+          // Criar estrutura padronizada
+          messageToProcess.message = {
+            audioMessage: audioInfo
           };
         }
       }
       
-      // Processar a mensagem se conseguimos montar uma estrutura válida
+      // Processar a mensagem
       if (messageToProcess) {
         logger.info('Processando mensagem estruturada:', JSON.stringify(messageToProcess));
         await messageService.processMessage(messageToProcess);
@@ -172,8 +174,6 @@ class WebhookController {
       logger.info('Novo QR Code disponível');
       logger.info(`QR Code: ${qrcode.substring(0, 50)}...`);
       
-      // Aqui você pode implementar lógica para exibir o QR Code
-      // Por exemplo, salvar em arquivo ou enviar por email
       console.log('\n\n=== QR CODE PARA ESCANEAR ===');
       console.log('Acesse: https://www.qr-code-generator.com/');
       console.log('Cole o código abaixo para gerar o QR Code:');
@@ -201,9 +201,6 @@ class WebhookController {
   
   // Middleware para validar webhook
   validateWebhook(req, res, next) {
-    // TEMPORARIAMENTE desabilitar validação para testar
-    // TODO: Implementar validação correta depois
-    
     // Verificar se tem body
     if (!req.body) {
       return res.status(400).json({ error: 'No body provided' });
