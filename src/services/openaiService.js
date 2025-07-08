@@ -15,12 +15,21 @@ class OpenAIService {
       return;
     }
     
+    // Modelos atualizados para 2025
+    this.chatModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    this.whisperModel = process.env.WHISPER_MODEL || 'gpt-4o-mini-transcribe';
+    
+    console.log(`🤖 OpenAI Service inicializado`);
+    console.log(`📊 Modelo de chat: ${this.chatModel}`);
+    console.log(`🎤 Modelo de áudio: ${this.whisperModel}`);
+    
     this.api = axios.create({
       baseURL: this.apiUrl,
       headers: {
         'Authorization': `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 60000 // 60 segundos
     });
     
     // Contexto do assistente
@@ -56,7 +65,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
     this.conversationCache = new Map();
   }
   
-  // Transcrever áudio para texto - CORRIGIDO E MELHORADO
+  // Transcrever áudio para texto - ATUALIZADO COM NOVOS MODELOS
   async transcribeAudio(audioData, mimeType = 'audio/ogg') {
     try {
       if (!this.apiKey) {
@@ -64,6 +73,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       }
       
       console.log('🎤 Iniciando transcrição de áudio...');
+      console.log(`📊 Modelo: ${this.whisperModel}`);
       console.log(`📊 Tipo: ${mimeType}, Tamanho: ${audioData.length} bytes`);
       
       // Criar diretório temporário se não existir
@@ -107,15 +117,33 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       // Criar FormData
       const formData = new FormData();
       formData.append('file', fs.createReadStream(tempPath));
-      formData.append('model', 'whisper-1');
+      formData.append('model', this.whisperModel);
       formData.append('language', 'pt'); // Português
-      formData.append('response_format', 'json');
       
-      // Adicionar prompt para melhorar a transcrição em português
-      formData.append('prompt', 'Transcreva o áudio em português brasileiro. O contexto é sobre imóveis, casas, apartamentos, compra, venda ou aluguel.');
+      // Response format baseado no modelo
+      if (this.whisperModel.includes('gpt-4o')) {
+        // Novos modelos só suportam json ou text
+        formData.append('response_format', 'json');
+      } else {
+        // Whisper-1 suporta mais formatos
+        formData.append('response_format', 'json');
+      }
+      
+      // Prompt melhorado para os novos modelos
+      if (this.whisperModel.includes('gpt-4o')) {
+        formData.append('prompt', 
+          'Transcreva fielmente o áudio em português brasileiro. ' +
+          'Contexto: cliente procurando imóveis (casas, apartamentos) para comprar, vender ou alugar. ' +
+          'Preserve gírias regionais, sotaques e a forma natural de falar. ' +
+          'Termos comuns: kitnet, quitinete, JK, studio, cobertura, duplex, sobrado, geminado.'
+        );
+      } else {
+        // Prompt simples para whisper-1
+        formData.append('prompt', 'Transcreva o áudio em português brasileiro. O contexto é sobre imóveis.');
+      }
       
       // Fazer requisição
-      console.log('📤 Enviando para OpenAI Whisper...');
+      console.log('📤 Enviando para OpenAI...');
       const response = await axios.post(
         `${this.apiUrl}/audio/transcriptions`,
         formData,
@@ -181,6 +209,8 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
         throw new Error('Áudio muito grande (máximo 25MB)');
       } else if (error.response?.status === 415) {
         throw new Error('Formato de áudio não suportado');
+      } else if (error.response?.status === 400 && error.response?.data?.error?.message?.includes('model')) {
+        throw new Error(`Modelo ${this.whisperModel} não disponível. Use whisper-1, gpt-4o-transcribe ou gpt-4o-mini-transcribe`);
       } else if (error.message.includes('ENOENT')) {
         throw new Error('Erro ao salvar arquivo temporário');
       } else if (error.message.includes('timeout')) {
@@ -199,7 +229,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       const messages = this.buildConversationContext(context.userId, userMessage, botResponse);
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-3.5-turbo', // Use gpt-4 se tiver acesso
+        model: this.chatModel,
         messages: messages,
         temperature: 0.7,
         max_tokens: 500,
@@ -214,7 +244,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       
       return enhancedResponse;
     } catch (error) {
-      console.error('Erro ao melhorar resposta:', error.message);
+      console.error('Erro ao melhorar resposta:', error.response?.data || error.message);
       return botResponse;
     }
   }
@@ -231,7 +261,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       }
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-3.5-turbo',
+        model: this.chatModel,
         messages: [
           {
             role: 'system',
@@ -260,7 +290,7 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       const content = response.data.choices[0].message.content;
       return JSON.parse(content);
     } catch (error) {
-      console.error('Erro ao analisar intenção:', error);
+      console.error('Erro ao analisar intenção:', error.response?.data || error.message);
       return {
         intent: 'other',
         propertyType: 'any',
@@ -291,7 +321,7 @@ A descrição deve:
 5. Usar linguagem elegante mas acessível`;
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-3.5-turbo',
+        model: this.chatModel,
         messages: [
           { role: 'system', content: 'Você é um redator especializado em imóveis de alto padrão.' },
           { role: 'user', content: prompt }
@@ -302,7 +332,7 @@ A descrição deve:
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao gerar descrição:', error);
+      console.error('Erro ao gerar descrição:', error.response?.data || error.message);
       return property.description;
     }
   }
@@ -326,7 +356,7 @@ Forneça:
 3. Ordem de prioridade para apresentação`;
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-3.5-turbo',
+        model: this.chatModel,
         messages: [
           { role: 'system', content: this.systemPrompt },
           { role: 'user', content: prompt }
@@ -337,7 +367,7 @@ Forneça:
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao gerar sugestões:', error);
+      console.error('Erro ao gerar sugestões:', error.response?.data || error.message);
       return null;
     }
   }
@@ -364,7 +394,7 @@ Forneça informações precisas e úteis sobre:
 Seja objetivo mas completo.`;
       
       const response = await this.api.post('/chat/completions', {
-        model: 'gpt-3.5-turbo',
+        model: this.chatModel,
         messages: [
           { 
             role: 'system', 
@@ -378,7 +408,7 @@ Seja objetivo mas completo.`;
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao responder pergunta:', error);
+      console.error('Erro ao responder pergunta:', error.response?.data || error.message);
       return 'Desculpe, não consegui processar sua pergunta no momento.';
     }
   }

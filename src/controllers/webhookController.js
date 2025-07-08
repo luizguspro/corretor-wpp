@@ -68,77 +68,77 @@ class WebhookController {
     }
   }
   
-  // Lidar com novas mensagens
+  // Lidar com novas mensagens - VERSÃO CORRIGIDA
   async handleMessageUpsert(data) {
     try {
       logger.info('handleMessageUpsert - Data recebida:', JSON.stringify(data));
       
-      // Evolution API envia os dados da mensagem diretamente no data
+      // Evolution API v2 envia diretamente no data
       let messageToProcess = null;
       
-      // Se tem key e message, é uma mensagem completa
       if (data.key && data.message) {
         messageToProcess = data;
-      } 
-      // Se tem remoteJid e message no nível superior
-      else if (data.remoteJid && data.message) {
-        messageToProcess = {
-          key: {
-            remoteJid: data.remoteJid,
-            fromMe: data.fromMe || false,
-            id: data.id || 'msg-' + Date.now()
-          },
-          message: data.message,
-          pushName: data.pushName || 'User',
-          messageTimestamp: data.messageTimestamp
-        };
       }
-      // Se tem messages array
-      else if (data.messages && Array.isArray(data.messages)) {
-        for (const msg of data.messages) {
-          await messageService.processMessage(msg);
-        }
+      
+      if (!messageToProcess) {
+        logger.error('Estrutura de mensagem inválida');
         return;
       }
       
-      // Verificar se é mensagem de áudio
-      if (messageToProcess && messageToProcess.message) {
-        const message = messageToProcess.message;
+      // CORREÇÃO PRINCIPAL: Detectar e processar áudio corretamente
+      if (messageToProcess.message?.audioMessage) {
+        logger.info('🎤 Áudio detectado! Estrutura:', {
+          hasBase64: !!messageToProcess.message.audioMessage.base64,
+          hasUrl: !!messageToProcess.message.audioMessage.url,
+          hasMediaUrl: !!messageToProcess.message.audioMessage.mediaUrl,
+          mimetype: messageToProcess.message.audioMessage.mimetype,
+          seconds: messageToProcess.message.audioMessage.seconds,
+          // Campos adicionais para debug
+          hasFileLength: !!messageToProcess.message.audioMessage.fileLength,
+          hasPtt: !!messageToProcess.message.audioMessage.ptt,
+          allKeys: Object.keys(messageToProcess.message.audioMessage)
+        });
         
-        // Evolution API pode enviar áudio em diferentes formatos
-        if (message.audioMessage || message.audio || message.mediaMessage) {
-          logger.info('🎤 Mensagem de áudio detectada!');
-          
-          // Estrutura específica para áudio
-          const audioData = message.audioMessage || message.audio || message.mediaMessage;
-          logger.info('Estrutura do áudio:', JSON.stringify(audioData));
-          
-          // Evolution API geralmente envia o áudio como:
-          // - base64: string base64 do arquivo
-          // - url: URL para download
-          // - mediaUrl: URL alternativa
-          
-          let audioInfo = {
-            ...audioData,
-            mimetype: audioData.mimetype || 'audio/ogg',
-            // Se tem URL, vamos preferir ela
-            url: audioData.url || audioData.mediaUrl || audioData.fileUrl
-          };
-          
-          // Criar estrutura padronizada
-          messageToProcess.message = {
-            audioMessage: audioInfo
-          };
+        // Evolution API v2 geralmente envia em base64
+        const audioData = messageToProcess.message.audioMessage;
+        
+        // Log completo do audioMessage para debug
+        logger.info('AudioMessage completo:', JSON.stringify(audioData, null, 2));
+        
+        // Garantir que temos dados de áudio
+        if (!audioData.base64 && !audioData.url && !audioData.mediaUrl) {
+          logger.error('Áudio sem base64 ou URL');
+          await messageService.processMessage({
+            ...messageToProcess,
+            message: {
+              conversation: '🎤 Desculpe, não consegui processar seu áudio. Por favor, tente novamente ou digite sua mensagem.'
+            }
+          });
+          return;
         }
+        
+        // Estrutura limpa para o messageService
+        messageToProcess.message = {
+          audioMessage: {
+            base64: audioData.base64 || null,
+            url: audioData.url || audioData.mediaUrl || null,
+            mimetype: audioData.mimetype || 'audio/ogg',
+            seconds: audioData.seconds || 0,
+            fileLength: audioData.fileLength || 0,
+            ptt: audioData.ptt || false
+          }
+        };
+        
+        logger.info('Áudio estruturado para processamento:', {
+          hasBase64: !!messageToProcess.message.audioMessage.base64,
+          base64Length: messageToProcess.message.audioMessage.base64?.length || 0,
+          url: messageToProcess.message.audioMessage.url,
+          mimetype: messageToProcess.message.audioMessage.mimetype
+        });
       }
       
-      // Processar a mensagem
-      if (messageToProcess) {
-        logger.info('Processando mensagem estruturada:', JSON.stringify(messageToProcess));
-        await messageService.processMessage(messageToProcess);
-      } else {
-        logger.error('Não foi possível processar mensagem. Estrutura inválida.');
-      }
+      // Processar mensagem
+      await messageService.processMessage(messageToProcess);
       
     } catch (error) {
       logger.error(`Erro ao processar mensagem: ${error.message}`, error);

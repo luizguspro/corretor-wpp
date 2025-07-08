@@ -15,6 +15,27 @@ app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 app.use(morgan('dev'));
 
+// MIDDLEWARE DE DEBUG PARA ÁUDIO
+app.use((req, res, next) => {
+  if (req.path === '/webhook' && req.body.event === 'messages.upsert') {
+    const data = req.body.data;
+    if (data?.message?.audioMessage) {
+      console.log('\n🎙️ ========== ÁUDIO RECEBIDO ==========');
+      console.log('📊 Informações do Áudio:');
+      console.log('- Tem base64?', !!data.message.audioMessage.base64);
+      console.log('- Tamanho base64:', data.message.audioMessage.base64?.length || 0);
+      console.log('- Tem URL?', !!data.message.audioMessage.url);
+      console.log('- Mimetype:', data.message.audioMessage.mimetype);
+      console.log('- Duração:', data.message.audioMessage.seconds, 'segundos');
+      console.log('- Tamanho arquivo:', data.message.audioMessage.fileLength, 'bytes');
+      console.log('- É PTT?', data.message.audioMessage.ptt);
+      console.log('- Campos disponíveis:', Object.keys(data.message.audioMessage));
+      console.log('=====================================\n');
+    }
+  }
+  next();
+});
+
 // Rota de health check
 app.get('/health', (req, res) => {
   res.json({ 

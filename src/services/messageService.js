@@ -92,7 +92,7 @@ class MessageService {
     }
   }
 
-  // Lidar com mensagens de áudio - CORRIGIDO COM CAMPO BODY
+  // Lidar com mensagens de áudio - VERSÃO CORRIGIDA E SIMPLIFICADA
   async handleAudioMessage(from, audioMessage, session, profile) {
     try {
       await evolutionService.sendTextMessage(from, '🎤 Recebendo seu áudio...');
@@ -106,109 +106,61 @@ class MessageService {
         return;
       }
 
-      console.log('🎧 Processando áudio:', {
+      console.log('🎧 Processando áudio - Estrutura recebida:', {
+        hasBase64: !!audioMessage.base64,
+        base64Length: audioMessage.base64?.length || 0,
+        hasUrl: !!audioMessage.url,
         mimetype: audioMessage.mimetype,
-        fileLength: audioMessage.fileLength,
         seconds: audioMessage.seconds,
-        keys: Object.keys(audioMessage)
+        fileLength: audioMessage.fileLength
       });
 
-      // DEBUG: Mostrar todos os campos disponíveis
-      console.log('🔍 Campos disponíveis no audioMessage:', Object.keys(audioMessage));
-      console.log('📦 Tem body?', audioMessage.body ? `Sim (${audioMessage.body.length} chars)` : 'Não');
-
-      // Evolution API pode enviar o áudio de diferentes formas
       let audioBuffer = null;
-      let audioUrl = null;
-
-      // Primeiro, tentar pegar URL do áudio
-      audioUrl = audioMessage.url || 
-                 audioMessage.mediaUrl || 
-                 audioMessage.fileUrl || 
-                 audioMessage.directPath;
-
-      // Se tem URL e ela começa com http, fazer download
-      if (audioUrl && audioUrl.startsWith('http')) {
-        console.log('🔗 URL de áudio detectada:', audioUrl);
+      
+      // 1. PRIMEIRO: Tentar base64 (Evolution API v2 envia assim)
+      if (audioMessage.base64) {
+        console.log('✅ Base64 encontrado! Tamanho:', audioMessage.base64.length);
         try {
-          // Se a URL é da Evolution API, adicionar headers de autenticação
+          // Remover header data:audio se existir
+          let base64Data = audioMessage.base64;
+          if (base64Data.includes('base64,')) {
+            base64Data = base64Data.split('base64,')[1];
+          }
+          
+          audioBuffer = Buffer.from(base64Data, 'base64');
+          console.log(`✅ Buffer criado do base64: ${audioBuffer.length} bytes`);
+        } catch (e) {
+          console.error('❌ Erro ao decodificar base64:', e.message);
+        }
+      }
+      
+      // 2. SEGUNDO: Se não tem base64, tentar baixar pela URL
+      if (!audioBuffer && audioMessage.url) {
+        console.log('📥 Tentando baixar áudio pela URL:', audioMessage.url);
+        try {
           const headers = {};
-          if (audioUrl.includes(process.env.EVOLUTION_API_URL)) {
+          // Se a URL é do Evolution API, adicionar apikey
+          if (audioMessage.url.includes(process.env.EVOLUTION_API_URL)) {
             headers['apikey'] = process.env.EVOLUTION_API_KEY;
           }
-
-          const response = await axios.get(audioUrl, {
+          
+          const response = await axios.get(audioMessage.url, {
             responseType: 'arraybuffer',
             headers: headers,
-            timeout: 30000 // 30 segundos timeout
+            timeout: 30000 // 30 segundos
           });
           
           audioBuffer = Buffer.from(response.data);
-          console.log(`✅ Áudio baixado: ${audioBuffer.length} bytes`);
-        } catch (error) {
-          console.error('Erro ao baixar áudio:', error.message);
-          // Continuar para tentar outros métodos
+          console.log(`✅ Áudio baixado via URL: ${audioBuffer.length} bytes`);
+        } catch (e) {
+          console.error('❌ Erro ao baixar áudio:', e.message);
         }
       }
-
-      // Se não conseguiu por URL, tentar base64
-      if (!audioBuffer) {
-        // Lista de possíveis campos com base64 - BODY ADICIONADO AQUI!
-        const base64Fields = ['body', 'base64', 'data', 'fileData', 'content'];
-        
-        for (const field of base64Fields) {
-          if (audioMessage[field]) {
-            console.log(`📦 Tentando extrair áudio de: ${field}`);
-            try {
-              // Remover header data:audio se existir
-              let base64Data = audioMessage[field];
-              if (base64Data.includes('base64,')) {
-                base64Data = base64Data.split('base64,')[1];
-              }
-              
-              audioBuffer = Buffer.from(base64Data, 'base64');
-              if (audioBuffer.length > 0) {
-                console.log(`✅ Áudio extraído de ${field}: ${audioBuffer.length} bytes`);
-                break;
-              }
-            } catch (e) {
-              console.log(`❌ ${field} não é base64 válido`);
-            }
-          }
-        }
-      }
-
-      // Se ainda não tem buffer, tentar pegar via Evolution API
-      if (!audioBuffer && audioMessage.id) {
-        console.log('🔄 Tentando baixar áudio via Evolution API...');
-        try {
-          // Tentar endpoint de download de mídia
-          const mediaResponse = await axios.get(
-            `${process.env.EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${process.env.INSTANCE_NAME}`,
-            {
-              params: {
-                messageId: audioMessage.id,
-                remoteJid: from
-              },
-              headers: {
-                'apikey': process.env.EVOLUTION_API_KEY
-              }
-            }
-          );
-
-          if (mediaResponse.data && mediaResponse.data.base64) {
-            audioBuffer = Buffer.from(mediaResponse.data.base64, 'base64');
-            console.log('✅ Áudio obtido via API');
-          }
-        } catch (error) {
-          console.error('Erro ao obter mídia via API:', error.message);
-        }
-      }
-
+      
+      // 3. Verificar se conseguimos o áudio
       if (!audioBuffer || audioBuffer.length === 0) {
-        console.error('❌ Não foi possível extrair o áudio da mensagem');
-        console.log('Estrutura completa do audioMessage:', JSON.stringify(audioMessage, null, 2));
-
+        console.error('❌ Não foi possível obter o áudio. Estrutura completa:', JSON.stringify(audioMessage, null, 2));
+        
         await evolutionService.sendTextMessage(
           from,
           '😔 Desculpe, não consegui processar seu áudio. Pode tentar enviar novamente ou digitar sua mensagem?'
@@ -216,9 +168,9 @@ class MessageService {
         return;
       }
 
-      console.log(`✅ Buffer de áudio pronto: ${audioBuffer.length} bytes`);
+      console.log(`✅ Áudio pronto para transcrição: ${audioBuffer.length} bytes`);
 
-      // Verificar se o áudio não é muito grande (limite de 25MB do Whisper)
+      // 4. Verificar tamanho (limite Whisper: 25MB)
       const maxSize = 25 * 1024 * 1024; // 25MB
       if (audioBuffer.length > maxSize) {
         await evolutionService.sendTextMessage(
@@ -228,15 +180,16 @@ class MessageService {
         return;
       }
 
-      // Transcrever com OpenAI
+      // 5. Transcrever com OpenAI
       let transcription = '';
       try {
+        console.log('🎯 Enviando para transcrição...');
         transcription = await openaiService.transcribeAudio(
           audioBuffer,
           audioMessage.mimetype || 'audio/ogg'
         );
 
-        console.log('📝 Transcrição:', transcription);
+        console.log('✅ Transcrição concluída:', transcription);
 
         // Enviar confirmação da transcrição
         await evolutionService.sendTextMessage(
@@ -245,9 +198,9 @@ class MessageService {
         );
 
       } catch (error) {
-        console.error('Erro na transcrição:', error);
+        console.error('❌ Erro na transcrição:', error);
 
-        // Mensagem de erro mais específica
+        // Mensagem de erro específica
         let errorMessage = '😔 Desculpe, não consegui transcrever seu áudio. ';
 
         if (error.message.includes('API key')) {
@@ -264,7 +217,7 @@ class MessageService {
         return;
       }
 
-      // Processar a transcrição como texto normal
+      // 6. Processar a transcrição como texto normal
       if (transcription && transcription.trim()) {
         await this.handleTextMessage(from, transcription, session, profile);
       } else {
@@ -275,7 +228,7 @@ class MessageService {
       }
 
     } catch (error) {
-      console.error('Erro geral ao processar áudio:', error);
+      console.error('❌ Erro geral ao processar áudio:', error);
       await evolutionService.sendTextMessage(
         from,
         '😔 Desculpe, houve um erro ao processar seu áudio. Por favor, tente novamente ou digite sua mensagem.'
@@ -622,7 +575,21 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
 
   // Enviar formulário de venda
   async sendSellingForm(from) {
-    const message = messageTemplates.getSellingFormMessage();
+    const message = `💰 *Vamos avaliar seu imóvel gratuitamente!*
+
+Para começar, preciso de algumas informações:
+
+1️⃣ Tipo de imóvel (casa/apartamento)
+2️⃣ Endereço completo
+3️⃣ Área (m²)
+4️⃣ Quantidade de quartos e banheiros
+5️⃣ Ano de construção
+6️⃣ Valor esperado de venda
+
+📸 Se possível, envie algumas fotos!
+
+_Nossa equipe fará uma avaliação completa e entrará em contato em até 24h._`;
+    
     await evolutionService.sendTextMessage(from, message);
   }
 
@@ -636,7 +603,32 @@ ${property.virtualTour ? `\n🎬 *Tour Virtual:* ${property.virtualTour}` : ''}`
 
   // Enviar informações de contato
   async sendContactInfo(from) {
-    const contactInfo = messageTemplates.getContactInfo();
+    const contactInfo = `📞 *Nossos Corretores Especializados*
+
+👨‍💼 *Carlos Silva*
+📱 WhatsApp: (48) 99988-7766
+🏆 Especialista em Alto Padrão
+⏰ Horário: Seg-Sex 9h-19h, Sáb 9h-13h
+
+👩‍💼 *Ana Costa*
+📱 WhatsApp: (48) 99977-6655
+🏆 Especialista em Locação
+⏰ Horário: Seg-Sex 9h-19h
+
+👨‍💼 *Roberto Santos*
+📱 WhatsApp: (48) 99966-5544
+🏆 Especialista em Lançamentos
+⏰ Horário: Seg-Sex 9h-19h, Sáb 9h-13h
+
+📍 *Escritório Central*
+Av. Beira Mar Norte, 2500 - Agronômica
+Florianópolis/SC
+
+🌐 www.imobiliariapremium.com.br
+📧 contato@imobiliariapremium.com.br
+
+_Escolha um corretor e clique no WhatsApp para falar diretamente!_`;
+
     await evolutionService.sendTextMessage(from, contactInfo);
   }
 
