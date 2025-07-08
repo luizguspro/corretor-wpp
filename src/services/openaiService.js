@@ -1,4 +1,4 @@
-// src/services/openaiService.js
+// src/services/openaiService.js - VERSÃO ATUALIZADA COM NOVOS MODELOS
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
@@ -9,19 +9,23 @@ class OpenAIService {
     this.apiKey = process.env.OPENAI_API_KEY;
     this.apiUrl = 'https://api.openai.com/v1';
     
-    // Verificar se a API key existe
     if (!this.apiKey) {
       console.warn('⚠️ OpenAI API Key não configurada');
       return;
     }
     
-    // Modelos atualizados para 2025
+    // MODELOS ATUALIZADOS - Documentação oficial OpenAI
     this.chatModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    
+    // Novos modelos de transcrição (escolha um):
+    // - gpt-4o-transcribe (mais qualidade)
+    // - gpt-4o-mini-transcribe (mais rápido e barato)
+    // - whisper-1 (modelo clássico com mais opções)
     this.whisperModel = process.env.WHISPER_MODEL || 'gpt-4o-mini-transcribe';
     
     console.log(`🤖 OpenAI Service inicializado`);
     console.log(`📊 Modelo de chat: ${this.chatModel}`);
-    console.log(`🎤 Modelo de áudio: ${this.whisperModel}`);
+    console.log(`🎤 Modelo de transcrição: ${this.whisperModel}`);
     
     this.api = axios.create({
       baseURL: this.apiUrl,
@@ -29,7 +33,7 @@ class OpenAIService {
         'Authorization': `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json'
       },
-      timeout: 60000 // 60 segundos
+      timeout: 60000
     });
     
     // Contexto do assistente
@@ -49,101 +53,123 @@ Diretrizes:
 5. Destaque os pontos fortes de cada região
 6. Seja honesto sobre prós e contras
 7. Sempre tente agendar uma visita presencial
-8. Se não souber algo, admita e ofereça buscar a informação
-
-Conhecimento local:
-- Jurerê Internacional: Bairro nobre, praias calmas, alta gastronomia
-- Lagoa da Conceição: Boêmio, jovem, ótima vida noturna
-- Centro: Prático, comércio, fácil acesso
-- Campeche: Familiar, praia extensa, em valorização
-- Balneário Camboriú: Urbano, arranha-céus, vida noturna intensa
-- Santo Antônio de Lisboa: Histórico, pôr do sol, gastronomia
-
-Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões baseado no perfil do cliente.`;
+8. Se não souber algo, admita e ofereça buscar a informação`;
     
-    // Cache de conversas para contexto
     this.conversationCache = new Map();
   }
   
-  // Transcrever áudio para texto - ATUALIZADO COM NOVOS MODELOS
+  // Transcrever áudio - VERSÃO COM NOVOS MODELOS
   async transcribeAudio(audioData, mimeType = 'audio/ogg') {
     try {
       if (!this.apiKey) {
         throw new Error('OpenAI API Key não configurada');
       }
       
-      console.log('🎤 Iniciando transcrição de áudio...');
-      console.log(`📊 Modelo: ${this.whisperModel}`);
-      console.log(`📊 Tipo: ${mimeType}, Tamanho: ${audioData.length} bytes`);
+      console.log('🎤 [OpenAI] Iniciando transcrição...');
+      console.log(`📊 [OpenAI] Modelo: ${this.whisperModel}`);
+      console.log(`📊 [OpenAI] Dados:`, {
+        tipo: Buffer.isBuffer(audioData) ? 'Buffer' : typeof audioData,
+        tamanho: audioData.length,
+        mimeType: mimeType
+      });
       
-      // Criar diretório temporário se não existir
+      // Criar diretório temporário
       const tempDir = path.join(__dirname, '../../temp');
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
       }
       
-      // Determinar extensão baseada no mimeType
-      let extension = 'ogg';
-      if (mimeType.includes('mp4')) extension = 'mp4';
-      if (mimeType.includes('mpeg') || mimeType.includes('mp3')) extension = 'mp3';
-      if (mimeType.includes('wav')) extension = 'wav';
-      if (mimeType.includes('webm')) extension = 'webm';
-      if (mimeType.includes('opus')) extension = 'opus';
-      if (mimeType.includes('m4a')) extension = 'm4a';
+      // Mapear mime types para extensões
+      const extensionMap = {
+        'audio/ogg': 'ogg',
+        'audio/mpeg': 'mp3',
+        'audio/mp3': 'mp3',
+        'audio/mp4': 'm4a',
+        'audio/x-m4a': 'm4a',
+        'audio/wav': 'wav',
+        'audio/webm': 'webm',
+        'audio/opus': 'opus',
+        'audio/x-opus+ogg': 'opus'
+      };
       
-      // Gerar nome único para o arquivo
-      const tempFileName = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${extension}`;
-      const tempPath = path.join(tempDir, tempFileName);
+      const extension = extensionMap[mimeType] || 'ogg';
       
-      // Salvar áudio
+      // Nome único para o arquivo
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).substring(7);
+      const filename = `audio_${timestamp}_${random}.${extension}`;
+      const filepath = path.join(tempDir, filename);
+      
+      console.log(`📁 [OpenAI] Salvando áudio: ${filename}`);
+      
+      // Converter e salvar áudio
+      let audioBuffer;
       if (Buffer.isBuffer(audioData)) {
-        fs.writeFileSync(tempPath, audioData);
+        audioBuffer = audioData;
       } else if (typeof audioData === 'string') {
-        // Se for base64
-        const buffer = Buffer.from(audioData, 'base64');
-        fs.writeFileSync(tempPath, buffer);
+        // Remover header data:audio se existir
+        let base64Data = audioData;
+        if (base64Data.includes('base64,')) {
+          base64Data = base64Data.split('base64,')[1];
+        }
+        audioBuffer = Buffer.from(base64Data, 'base64');
       } else {
-        throw new Error('Formato de áudio não reconhecido');
+        throw new Error('Formato de áudio não suportado');
       }
       
-      console.log(`📁 Áudio salvo em: ${tempPath}`);
-      console.log(`📊 Tamanho do arquivo: ${fs.statSync(tempPath).size} bytes`);
+      // Verificar tamanho (limite: 25MB)
+      const fileSizeMB = audioBuffer.length / (1024 * 1024);
+      console.log(`📊 [OpenAI] Tamanho: ${fileSizeMB.toFixed(2)}MB`);
       
-      // Verificar se o arquivo não está vazio
-      if (fs.statSync(tempPath).size === 0) {
-        throw new Error('Arquivo de áudio vazio');
+      if (fileSizeMB > 25) {
+        throw new Error('Arquivo muito grande. Máximo: 25MB');
       }
+      
+      // Salvar arquivo
+      fs.writeFileSync(filepath, audioBuffer);
+      
+      // Verificar se foi salvo
+      const stats = fs.statSync(filepath);
+      if (stats.size === 0) {
+        throw new Error('Arquivo salvo está vazio');
+      }
+      
+      console.log(`✅ [OpenAI] Arquivo salvo: ${stats.size} bytes`);
       
       // Criar FormData
       const formData = new FormData();
-      formData.append('file', fs.createReadStream(tempPath));
-      formData.append('model', this.whisperModel);
-      formData.append('language', 'pt'); // Português
+      formData.append('file', fs.createReadStream(filepath), {
+        filename: filename,
+        contentType: mimeType || 'audio/ogg'
+      });
       
-      // Response format baseado no modelo
+      formData.append('model', this.whisperModel);
+      
+      // Configurações baseadas no modelo
       if (this.whisperModel.includes('gpt-4o')) {
         // Novos modelos só suportam json ou text
         formData.append('response_format', 'json');
+        
+        // Prompt melhorado para os novos modelos
+        const prompt = 'Transcreva fielmente este áudio em português brasileiro. ' +
+                      'Contexto: cliente procurando imóveis para comprar, vender ou alugar em Florianópolis. ' +
+                      'Preserve a forma natural de falar, incluindo pausas e hesitações. ' +
+                      'Termos comuns do mercado: kitnet, quitinete, JK, studio, cobertura, duplex, sobrado, ' +
+                      'geminado, garden, loft, flat, home office, pet friendly, vista mar, pé na areia.';
+        
+        formData.append('prompt', prompt);
+        
       } else {
-        // Whisper-1 suporta mais formatos
+        // whisper-1 tem mais opções
         formData.append('response_format', 'json');
+        formData.append('language', 'pt');
+        formData.append('prompt', 'Transcreva o áudio em português brasileiro sobre imóveis.');
       }
       
-      // Prompt melhorado para os novos modelos
-      if (this.whisperModel.includes('gpt-4o')) {
-        formData.append('prompt', 
-          'Transcreva fielmente o áudio em português brasileiro. ' +
-          'Contexto: cliente procurando imóveis (casas, apartamentos) para comprar, vender ou alugar. ' +
-          'Preserve gírias regionais, sotaques e a forma natural de falar. ' +
-          'Termos comuns: kitnet, quitinete, JK, studio, cobertura, duplex, sobrado, geminado.'
-        );
-      } else {
-        // Prompt simples para whisper-1
-        formData.append('prompt', 'Transcreva o áudio em português brasileiro. O contexto é sobre imóveis.');
-      }
+      console.log('📤 [OpenAI] Enviando para API...');
       
       // Fazer requisição
-      console.log('📤 Enviando para OpenAI...');
+      const startTime = Date.now();
       const response = await axios.post(
         `${this.apiUrl}/audio/transcriptions`,
         formData,
@@ -154,70 +180,82 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
           },
           maxContentLength: Infinity,
           maxBodyLength: Infinity,
-          timeout: 60000 // 60 segundos timeout
+          timeout: 120000 // 2 minutos
         }
       );
       
+      const processingTime = Date.now() - startTime;
+      console.log(`⏱️ [OpenAI] Tempo: ${processingTime}ms`);
+      
       // Limpar arquivo temporário
       try {
-        fs.unlinkSync(tempPath);
-        console.log('🗑️ Arquivo temporário removido');
-      } catch (e) {
-        console.warn('Não foi possível deletar arquivo temporário:', e.message);
+        fs.unlinkSync(filepath);
+        console.log('🗑️ [OpenAI] Arquivo temporário removido');
+      } catch (cleanupError) {
+        console.warn('⚠️ [OpenAI] Não foi possível remover arquivo temporário');
       }
       
       // Validar resposta
-      if (!response.data || !response.data.text) {
+      if (!response.data || typeof response.data.text !== 'string') {
+        console.error('❌ [OpenAI] Resposta inválida:', response.data);
         throw new Error('Resposta inválida da API');
       }
       
       const transcription = response.data.text.trim();
-      console.log('✅ Transcrição concluída:', transcription);
       
-      // Verificar se a transcrição não está vazia
-      if (!transcription || transcription.length < 3) {
+      if (!transcription || transcription.length < 2) {
         throw new Error('Transcrição vazia ou muito curta');
       }
+      
+      console.log('✅ [OpenAI] Transcrição:', transcription);
       
       return transcription;
       
     } catch (error) {
-      console.error('❌ Erro ao transcrever áudio:', error.response?.data || error.message);
+      console.error('❌ [OpenAI] Erro na transcrição:', error);
       
       // Limpar arquivo temporário em caso de erro
-      if (tempPath && fs.existsSync(tempPath)) {
+      if (filepath && fs.existsSync(filepath)) {
         try {
-          fs.unlinkSync(tempPath);
-        } catch (e) {
-          // Ignorar erro ao deletar
-        }
+          fs.unlinkSync(filepath);
+        } catch (e) {}
       }
       
-      // Log mais detalhado do erro
+      // Tratamento detalhado de erros
       if (error.response) {
-        console.error('Status:', error.response.status);
-        console.error('Headers:', error.response.headers);
-        if (error.response.data) {
-          console.error('Resposta:', JSON.stringify(error.response.data, null, 2));
+        const status = error.response.status;
+        const errorData = error.response.data;
+        
+        console.error('[OpenAI] Status:', status);
+        console.error('[OpenAI] Resposta:', JSON.stringify(errorData, null, 2));
+        
+        if (status === 401) {
+          throw new Error('API Key inválida. Verifique sua chave OpenAI.');
+        } else if (status === 413) {
+          throw new Error('Áudio muito grande. Máximo: 25MB.');
+        } else if (status === 415) {
+          throw new Error('Formato não suportado. Use: mp3, mp4, mpeg, mpga, m4a, wav, webm.');
+        } else if (status === 429) {
+          throw new Error('Limite de requisições. Aguarde um momento.');
+        } else if (status === 400) {
+          const errorMessage = errorData?.error?.message || 'Requisição inválida';
+          
+          // Verificar se é erro de modelo
+          if (errorMessage.includes('model')) {
+            throw new Error(`Modelo "${this.whisperModel}" não disponível. Use: whisper-1, gpt-4o-transcribe ou gpt-4o-mini-transcribe`);
+          }
+          
+          throw new Error(`Erro: ${errorMessage}`);
+        } else {
+          throw new Error(`Erro ${status}: ${errorData?.error?.message || 'Desconhecido'}`);
         }
+      } else if (error.code === 'ECONNABORTED') {
+        throw new Error('Tempo limite. Áudio muito longo.');
+      } else if (error.code === 'ENOTFOUND') {
+        throw new Error('Sem conexão com OpenAI.');
+      } else {
+        throw error;
       }
-      
-      // Mensagens de erro mais específicas
-      if (error.response?.status === 401) {
-        throw new Error('API Key inválida ou não autorizada');
-      } else if (error.response?.status === 413) {
-        throw new Error('Áudio muito grande (máximo 25MB)');
-      } else if (error.response?.status === 415) {
-        throw new Error('Formato de áudio não suportado');
-      } else if (error.response?.status === 400 && error.response?.data?.error?.message?.includes('model')) {
-        throw new Error(`Modelo ${this.whisperModel} não disponível. Use whisper-1, gpt-4o-transcribe ou gpt-4o-mini-transcribe`);
-      } else if (error.message.includes('ENOENT')) {
-        throw new Error('Erro ao salvar arquivo temporário');
-      } else if (error.message.includes('timeout')) {
-        throw new Error('Tempo limite excedido ao processar áudio');
-      }
-      
-      throw new Error('Não foi possível transcrever o áudio. ' + (error.response?.data?.error?.message || error.message));
     }
   }
   
@@ -239,12 +277,11 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       
       const enhancedResponse = response.data.choices[0].message.content;
       
-      // Atualizar cache de conversa
       this.updateConversationCache(context.userId, userMessage, enhancedResponse);
       
       return enhancedResponse;
     } catch (error) {
-      console.error('Erro ao melhorar resposta:', error.response?.data || error.message);
+      console.error('[OpenAI] Erro ao melhorar resposta:', error.response?.data || error.message);
       return botResponse;
     }
   }
@@ -265,22 +302,11 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
         messages: [
           {
             role: 'system',
-            content: `Analise a mensagem do usuário e identifique a intenção relacionada a imóveis.
-            Responda APENAS com um JSON no formato:
-            {
-              "intent": "buy|rent|sell|visit|info|other",
-              "propertyType": "house|apartment|land|commercial|any",
-              "location": "nome do bairro ou cidade se mencionado",
-              "priceRange": { "min": null, "max": null },
-              "bedrooms": null,
-              "features": ["features mencionadas"],
-              "urgency": "high|medium|low",
-              "sentiment": "positive|neutral|negative"
-            }`
+            content: `Analise a mensagem e retorne APENAS um JSON válido com a intenção do usuário sobre imóveis.`
           },
           {
             role: 'user',
-            content: userMessage
+            content: `Analise: "${userMessage}"\n\nRetorne JSON: {"intent": "buy|rent|sell|visit|info|other", "propertyType": "house|apartment|land|commercial|any", "location": "bairro/cidade se mencionado", "priceRange": {"min": null, "max": null}, "bedrooms": null, "features": [], "urgency": "high|medium|low", "sentiment": "positive|neutral|negative"}`
           }
         ],
         temperature: 0.3,
@@ -288,9 +314,16 @@ Sempre mencione que temos 30 imóveis disponíveis e personalize as sugestões b
       });
       
       const content = response.data.choices[0].message.content;
+      
+      // Extrair JSON
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      
       return JSON.parse(content);
     } catch (error) {
-      console.error('Erro ao analisar intenção:', error.response?.data || error.message);
+      console.error('[OpenAI] Erro ao analisar intenção:', error.message);
       return {
         intent: 'other',
         propertyType: 'any',
@@ -332,7 +365,7 @@ A descrição deve:
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao gerar descrição:', error.response?.data || error.message);
+      console.error('[OpenAI] Erro ao gerar descrição:', error.response?.data || error.message);
       return property.description;
     }
   }
@@ -352,8 +385,8 @@ ${availableProperties.map(p => `- ${p.title}: ${p.bedrooms} quartos, ${p.area}m�
 
 Forneça:
 1. Os 3 imóveis mais adequados com justificativa
-2. Um argumento de venda personalizado para cada um
-3. Ordem de prioridade para apresentação`;
+2. Um argumento de venda personalizado
+3. Ordem de prioridade`;
       
       const response = await this.api.post('/chat/completions', {
         model: this.chatModel,
@@ -367,7 +400,7 @@ Forneça:
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao gerar sugestões:', error.response?.data || error.message);
+      console.error('[OpenAI] Erro ao gerar sugestões:', error.response?.data || error.message);
       return null;
     }
   }
@@ -376,31 +409,20 @@ Forneça:
   async answerLocationQuestion(question) {
     try {
       if (!this.apiKey) {
-        return 'Desculpe, não consegui processar sua pergunta no momento.';
+        return 'Desculpe, não consegui processar sua pergunta.';
       }
-      
-      const prompt = `Responda esta pergunta sobre a região de Florianópolis/Balneário Camboriú:
-      
-"${question}"
-
-Forneça informações precisas e úteis sobre:
-- Características do local
-- Infraestrutura
-- Pontos de interesse
-- Perfil dos moradores
-- Valorização imobiliária
-- Prós e contras
-
-Seja objetivo mas completo.`;
       
       const response = await this.api.post('/chat/completions', {
         model: this.chatModel,
         messages: [
           { 
             role: 'system', 
-            content: 'Você é um especialista em imóveis da região de Florianópolis e Balneário Camboriú com 15 anos de experiência.' 
+            content: 'Você é um especialista em imóveis de Florianópolis e Balneário Camboriú.' 
           },
-          { role: 'user', content: prompt }
+          { 
+            role: 'user', 
+            content: `Responda sobre a região: "${question}"\n\nInclua: características, infraestrutura, perfil dos moradores, valorização.`
+          }
         ],
         temperature: 0.5,
         max_tokens: 400
@@ -408,8 +430,8 @@ Seja objetivo mas completo.`;
       
       return response.data.choices[0].message.content;
     } catch (error) {
-      console.error('Erro ao responder pergunta:', error.response?.data || error.message);
-      return 'Desculpe, não consegui processar sua pergunta no momento.';
+      console.error('[OpenAI] Erro ao responder:', error.response?.data || error.message);
+      return 'Desculpe, não consegui processar sua pergunta.';
     }
   }
   
@@ -419,27 +441,24 @@ Seja objetivo mas completo.`;
       { role: 'system', content: this.systemPrompt }
     ];
     
-    // Adicionar histórico se existir
     if (this.conversationCache.has(userId)) {
       const history = this.conversationCache.get(userId);
-      // Pegar apenas as últimas 5 interações
       const recentHistory = history.slice(-10);
       messages.push(...recentHistory);
     }
     
-    // Adicionar mensagem atual
     messages.push(
       { role: 'user', content: userMessage },
       { 
         role: 'assistant', 
-        content: `Resposta atual do bot: ${botResponse}\n\nPor favor, melhore esta resposta mantendo a mesma intenção mas tornando-a mais natural, amigável e persuasiva.` 
+        content: `Resposta atual: ${botResponse}\n\nMelhore mantendo a mesma intenção mas tornando-a mais natural e persuasiva.` 
       }
     );
     
     return messages;
   }
   
-  // Atualizar cache de conversa
+  // Atualizar cache
   updateConversationCache(userId, userMessage, assistantResponse) {
     if (!this.conversationCache.has(userId)) {
       this.conversationCache.set(userId, []);
@@ -451,17 +470,16 @@ Seja objetivo mas completo.`;
       { role: 'assistant', content: assistantResponse }
     );
     
-    // Limitar histórico para economizar tokens
     if (history.length > 20) {
       history.splice(0, history.length - 20);
     }
   }
   
-  // Limpar cache de conversa antiga (chamar periodicamente)
+  // Limpar conversas antigas
   cleanOldConversations() {
     const now = Date.now();
     for (const [userId, data] of this.conversationCache.entries()) {
-      if (now - data.lastUpdate > 3600000) { // 1 hora
+      if (now - data.lastUpdate > 3600000) {
         this.conversationCache.delete(userId);
       }
     }
